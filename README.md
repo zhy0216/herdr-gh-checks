@@ -7,6 +7,8 @@
 
 **Watch and review the current PR's CI in a [herdr](https://herdr.dev) pane.** The pane shows the PR headline, review decision, per-check progress, description, and the changed-file list, refreshed every 5s — and puts a compact CI/merge status on your sidebar space rows. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea). It only reads GitHub; the one thing it writes is your explicit merge / approve / review, run through `gh`.
 
+![GH Checks screenshot](assets/gh-checks.png)
+
 ## Features
 
 - **Live CI watch** — PR pill, review decision, animated per-check progress, and the changed-file list, polled every 5s until the PR settles.

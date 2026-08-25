@@ -5,14 +5,14 @@
 ![platforms: linux • macOS](https://img.shields.io/badge/platforms-linux%20%E2%80%A2%20macOS-informational)
 ![Go 1.25+](https://img.shields.io/badge/go-1.25%2B-00add8.svg)
 
-**Watch and review the current PR's CI in a [herdr](https://herdr.dev) pane.** The pane shows the PR headline, review decision, per-check progress, description, and the changed-file list, refreshed every 5s — and puts a compact CI/merge status on your sidebar space rows. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea). It only reads GitHub; the one thing it writes is your explicit merge / approve / review, run through `gh`.
+**Annotate and review the current PR in a [herdr](https://herdr.dev) pane.** Open any changed file side-by-side in `nvim`, press `ga` on a line to capture an exact `path:line` annotation, then send the notes to an agent pane. The pane also shows the PR headline, review decision, per-check progress, description, and changed-file list, refreshed every 5s — with a compact CI/merge status on your sidebar space rows. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea). It only reads GitHub; the one thing it writes is your explicit merge / approve / review, run through `gh`.
 
 ![GH Checks screenshot](assets/gh-checks.png)
 
 ## Features
 
 - **Live CI watch** — PR pill, review decision, animated per-check progress, and the changed-file list, polled every 5s until the PR settles.
-- **Review inline** — open any file side-by-side against base in `nvim`; `ga` records a `path:line` note, then `s` sends the review to an agent pane.
+- **Line-anchored annotations** — open a file side-by-side against base in `nvim`, press `ga` on any line to record a `path:line` note, manage notes with `a`, then press `s` to send the review to an agent pane.
 - **Any PR** — press `p` to browse open PRs and review / approve / comment / request-changes without leaving the pane.
 - **Workflows** — trigger a GitHub Actions workflow on a branch and watch a run to completion, right in the pane.
 - **Merge & update branch** — merge the PR or bring it up to date with base, worktree-aware.
@@ -74,10 +74,10 @@ Then press your prefix (default `ctrl+b`) followed by `i`. Avoid `alt+` chords (
 | Key | Action |
 | --- | --- |
 | `↑↓` · `j` `k` | Move the file cursor |
-| `⏎` | Review the selected file (`ga` in nvim annotates a line) |
+| `⏎` | Open the selected file for annotation in `nvim` (`ga` annotates a line) |
 | `d` | Review all files side-by-side |
 | `/` | Filter files |
-| `a` · `s` | Notes manager · send review to an agent |
+| `a` · `s` | Manage annotations · send review to an agent |
 | `u` · `m` · `o` | Update branch with base · merge · open on web |
 | `p` | Browse & review other PRs (`a` approve · `r` review · `c` comment) |
 | `tab` `w` | Focus Workflows — `⏎` run · `v` watch a run |

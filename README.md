@@ -3,9 +3,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![herdr 0.7+](https://img.shields.io/badge/herdr-0.7%2B-8a2be2)
 ![platforms: linux • macOS](https://img.shields.io/badge/platforms-linux%20%E2%80%A2%20macOS-informational)
-![Go 1.25+](https://img.shields.io/badge/go-1.25%2B-00add8.svg)
+![Go 1.25.14+](https://img.shields.io/badge/go-1.25.14%2B-00add8.svg)
 
-**Annotate and review the current PR in a [herdr](https://herdr.dev) pane.** Open any changed file side-by-side in `nvim`, press `ga` on a line to capture an exact `path:line` annotation, then send the notes to an agent pane. The pane also shows the PR headline, review decision, per-check progress, description, and changed-file list, refreshed every 5s — with a compact CI/merge status on your sidebar space rows. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea). It only reads GitHub; the one thing it writes is your explicit merge / approve / review, run through `gh`.
+**Annotate and review the current PR in a [herdr](https://herdr.dev) pane.** Open any changed file side-by-side in `nvim`, press `ga` on a line to capture an exact `path:line` annotation, then send the notes to an agent pane. The pane also shows the PR headline, review decision, per-check progress, description, and changed-file list, refreshed every 5s — with a compact CI/merge status on your sidebar space rows. Built with Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea). Read-only status polling is separated from explicit GitHub mutations (approve, review, workflow dispatch, update-branch, and merge); those actions run through your authenticated `gh` and require the relevant key/confirmation.
 
 ![GH Checks screenshot](assets/gh-checks.png)
 
@@ -25,11 +25,11 @@
 - A **Nerd Font** for the sidebar glyphs
 - **macOS or Linux** (amd64 / arm64).
 - **Windows**: `herdr plugin install` downloads the native `.exe` (no Go). The pane shells out to `sh`/`git`/`nvim`, so you need **git-bash / MSYS2 `sh` on `PATH`** for the diff & review features. **WSL is the simplest path** (installs the Linux build, everything just works) and native-Windows launch is not yet verified on real hardware — report issues.
-- **Go 1.25+** only if building from source — `plugin install` downloads a prebuilt binary when a matching release exists
+- **Go 1.25.14+** only if building from source — `plugin install` downloads a prebuilt binary only when a matching, allowlisted release asset exists
 
 ## Install
 
-From GitHub (downloads a prebuilt binary for your platform; builds from source only if there's no matching release):
+From GitHub (downloads a prebuilt binary only when its digest is present in the reviewed `release-checksums.txt` allowlist; otherwise builds from source):
 
 ```bash
 herdr plugin install itisbryan/herdr-gh-checks
@@ -78,9 +78,9 @@ Then press your prefix (default `ctrl+b`) followed by `i`. Avoid `alt+` chords (
 | `d` | Review all files side-by-side |
 | `/` | Filter files |
 | `a` · `s` | Manage annotations · send review to an agent |
-| `u` · `m` · `o` | Update branch with base · merge · open on web |
-| `p` | Browse & review other PRs (`a` approve · `r` review · `c` comment) |
-| `tab` `w` | Focus Workflows — `⏎` run · `v` watch a run |
+| `u` · `m` · `o` | Confirm/update branch with base · merge · open on web |
+| `p` | Browse & review other PRs (`a` confirm approve · `r` review · `c` comment) |
+| `tab` `w` | Focus Workflows — `⏎` choose/confirm run · `v` watch a run |
 | `1`–`4` | Fold sections |
 
 ## Sidebar setup
@@ -105,6 +105,16 @@ Run the status daemon in the background so the tokens stay fresh:
 ```bash
 nohup ./herdr-gh-checks/herdr-gh-checks --sidebar &
 ```
+
+## Security boundaries
+
+PR titles, descriptions, workflow names, check names, labels, and file paths are untrusted GitHub data. The TUI strips terminal control sequences; repository paths are restricted to regular, repository-relative files, and Neovim is invoked with `--` before filenames. The annotation helper is embedded in the plugin binary rather than loaded from the worktree. Review notes and the cached helper are stored under a private per-user cache directory with mode `0600` (on Windows, the normal per-user profile ACL is used).
+
+The plugin can change GitHub state only through the explicit actions documented above. Approve and update-branch show a confirmation screen; admin merge additionally requires typing `ADMIN`, and a final PR-state check runs immediately before merge. Sending notes is limited to agents in the current `HERDR_WORKSPACE_ID`. API and fetch operations accept only `github.com` remotes; GitHub Enterprise remotes are rejected. For the Git operations used by review, repository-defined hooks, URL rewrites, credential helpers, proxies, and custom upload-pack/SSH settings are intentionally ignored; use a normal authenticated `gh`/SSH setup rather than repository-local transport customization.
+
+Installers do not trust a release's adjacent `.sha256` file. They compare the downloaded asset with the checked-in digest allowlist and build from source when the version or platform is not listed. When Git metadata is present, a fork or modified checkout also refuses a binary from the canonical upstream owner and builds locally. Release workflow actions are pinned to commit IDs and existing releases are never overwritten. The allowlist is integrity protection, not an independent publisher signature; review the source and release provenance before installing.
+
+For vulnerability reports, see [SECURITY.md](SECURITY.md).
 
 ## License
 

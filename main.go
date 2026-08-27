@@ -1,10 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -49,7 +50,11 @@ func main() {
 // openPane shells back into herdr to launch a plugin pane next to the caller.
 func openPane(entrypoint, placement, direction string) {
 	cwd := ctxCwd()
-	args := []string{"plugin", "pane", "open", "--plugin", pluginID(), "--entrypoint", entrypoint, "--placement", placement}
+	id := pluginID()
+	if !safeIdentifier(id) {
+		return
+	}
+	args := []string{"plugin", "pane", "open", "--plugin", id, "--entrypoint", entrypoint, "--placement", placement}
 	if direction != "" {
 		args = append(args, "--direction", direction)
 	}
@@ -59,7 +64,12 @@ func openPane(entrypoint, placement, direction string) {
 	if cwd != "" {
 		args = append(args, "--env", "CI_CWD="+cwd)
 	}
-	out, err := exec.Command(herdrBin(), args...).Output()
+	// #nosec G204 -- all values are separate arguments; herdrBin is an explicit
+	// local executable override and no shell is invoked.
+	out, err := func() ([]byte, error) {
+		cmd := commandWithEnv(herdrBin(), secureShellEnvForDir(cwd), args...)
+		return limitedCommandOutput(cmd)
+	}()
 	if err != nil {
 		return
 	}
@@ -74,8 +84,9 @@ func openPane(entrypoint, placement, direction string) {
 				} `json:"plugin_pane"`
 			} `json:"result"`
 		}
-		if json.Unmarshal(out, &m) == nil && m.Result.PluginPane.Pane.ID != "" {
-			_ = exec.Command(herdrBin(), "pane", "resize", "--pane", m.Result.PluginPane.Pane.ID, "--direction", "right", "--amount", "0.12").Run()
+		if json.Unmarshal(out, &m) == nil && safeIdentifier(m.Result.PluginPane.Pane.ID) {
+			// #nosec G204 -- pane ID is passed as an argument, never through a shell.
+			_ = commandWithEnv(herdrBin(), secureShellEnvForDir(cwd), "pane", "resize", "--pane", m.Result.PluginPane.Pane.ID, "--direction", "right", "--amount", "0.12").Run()
 		}
 	}
 }
@@ -109,13 +120,20 @@ func ctxCwd() string {
 // ---------- merge ----------
 // gh's interactive flow picks squash/merge/rebase and shows the editable default commit message.
 func readKey() string {
-	cmd := exec.Command("sh", "-c", `read -rsn1 k; printf %s "$k"`)
+	cmd := commandWithEnv("sh", secureShellEnv(), "-c", `read -rsn1 k; printf %s "$k"`)
 	cmd.Stdin, cmd.Stderr = os.Stdin, os.Stderr
 	out, _ := cmd.Output()
 	return string(out)
 }
+
+func readLine() string {
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	line = strings.TrimSuffix(line, "\n")
+	line = strings.TrimSuffix(line, "\r")
+	return line
+}
 func anyKey() {
-	cmd := exec.Command("sh", "-c", "read -rsn1")
+	cmd := commandWithEnv("sh", secureShellEnv(), "-c", "read -rsn1")
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	_ = cmd.Run()
 }
@@ -134,7 +152,7 @@ func mergeFlow() {
 	fmt.Println()
 	fmt.Println("  " + sect.Render("\uf407 Merge pull request"))
 	fmt.Println()
-	fmt.Printf("  %s  %s\n", bold.Render(fmt.Sprintf("#%d", p.Number)), dim.Render(st.Branch))
+	fmt.Printf("  %s  %s\n", bold.Render(fmt.Sprintf("#%d", p.Number)), dim.Render(sanitizeTerminalText(st.Branch)))
 	if p.Title != "" {
 		fmt.Println("  " + dim.Render(trunc(p.Title, 70)))
 	}
@@ -150,12 +168,33 @@ func mergeFlow() {
 		fmt.Print("\n\n  cancelled\n")
 		return
 	}
+	if k != "a" && k != "A" && k != "\r" && k != "\n" {
+		fmt.Print("\n\n  cancelled (press enter to merge, or a for admin)\n")
+		return
+	}
 	flags := []string{"pr", "merge"}
 	if k == "a" || k == "A" {
+		fmt.Print("\n  " + yellow.Render("Admin bypass skips required checks and branch protection."))
+		fmt.Print("\n  Type " + bold.Render("ADMIN") + " to continue, or anything else to cancel: ")
+		if readLine() != "ADMIN" {
+			fmt.Print("\n\n  cancelled\n")
+			return
+		}
 		flags = append(flags, "--admin")
 	}
+	// Re-check immediately before the remote mutation so a stale pane cannot
+	// merge a PR that was closed or changed while the confirmation was shown.
+	if latest := prStatus(cwd); latest.PR == nil || latest.PR.State != "OPEN" || latest.PR.Number != p.Number {
+		fmt.Print("\n\n  " + red.Render("PR is no longer open; merge cancelled") + "\n")
+		return
+	}
 	fmt.Print("\x1b[2J\x1b[H")
-	cmd := exec.Command("gh", flags...)
+	cmd, ok := ghCommand(cwd, flags...)
+	if !ok {
+		fmt.Print("\n " + red.Render("repository remote is not a supported GitHub URL") + " — press any key\n")
+		anyKey()
+		return
+	}
 	cmd.Dir = cwd
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	err := cmd.Run()
@@ -183,8 +222,12 @@ var glyph = map[string]string{"pass": "\uf42e", "fail": "\uf467", "merged": "\uf
 var cspin = []rune("\u25d0\u25d3\u25d1\u25d2")
 
 func meta(id string, extra ...string) {
+	if !safeIdentifier(id) {
+		return
+	}
 	args := append([]string{"workspace", "report-metadata", id, "--source", "herdr-gh-checks"}, extra...)
-	_ = exec.Command(herdrBin(), args...).Run()
+	// #nosec G204 -- metadata values are passed as arguments, never shell text.
+	_ = commandWithEnv(herdrBin(), secureShellEnv(), args...).Run()
 }
 
 func sidebarLoop() {

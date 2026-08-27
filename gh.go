@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type Check struct {
@@ -51,22 +53,158 @@ type Status struct {
 
 // run executes name in cwd, returning trimmed stdout and ok=false on any error.
 func run(cwd, name string, args ...string) (string, bool) {
-	cmd := exec.Command(name, args...)
+	return runWithEnv(cwd, name, nil, args...)
+}
+
+func runWithEnv(cwd, name string, processEnv []string, args ...string) (string, bool) {
+	if processEnv == nil {
+		processEnv = secureShellEnvForDir(cwd)
+	}
+	cmd := commandWithEnv(name, processEnv, args...)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
-	out, err := cmd.Output()
+	out, err := limitedCommandOutput(cmd)
 	if err != nil {
 		return "", false
 	}
 	return strings.TrimSpace(string(out)), true
 }
 
+// githubRemoteAllowed prevents gh from using credentials against an arbitrary
+// host selected by a repository's remote configuration. The plugin targets
+// github.com; enterprise hosts, URL rewrites, and malformed URLs fail closed.
+func githubRemoteAllowed(cwd string) bool {
+	_, ok := githubRepoForCwd(cwd)
+	return ok
+}
+
+func githubRepoForCwd(cwd string) (string, bool) {
+	rewritten, ok := localGitURLRewrites(cwd)
+	if !ok || rewritten {
+		return "", false
+	}
+	raw, ok := runGit(cwd, "config", "--local", "--get", "remote.origin.url")
+	if !ok || !validGitHubRemote(raw) {
+		return "", false
+	}
+	return githubRemoteRepo(raw), true
+}
+
+func localGitURLRewrites(cwd string) (found, ok bool) {
+	cmd := commandWithEnv("git", secureShellEnvForDir(cwd), "config", "--local", "--includes", "--get-regexp", `^url\..*\.(insteadof|pushinsteadof)$`)
+	cmd.Dir = cwd
+	out, err := limitedCommandOutput(cmd)
+	if err == nil {
+		return len(strings.TrimSpace(string(out))) > 0, true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(out) == 0 {
+		// git config uses status 1 for a normal no-match query.
+		return false, true
+	}
+	return false, false
+}
+
+func validGitHubRemote(raw string) bool {
+	if raw == "" || !utf8.ValidString(raw) || strings.ContainsAny(raw, "\r\n\x00") {
+		return false
+	}
+	_, ok := strictGitHubRemoteRepo(raw)
+	return ok
+}
+
+func validGitHubRepoPath(repoPath string) bool {
+	repoPath = strings.TrimSuffix(strings.TrimSuffix(repoPath, "/"), ".git")
+	parts := strings.Split(repoPath, "/")
+	if len(parts) != 2 {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" {
+			return false
+		}
+		for _, r := range part {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || strings.ContainsRune("-_.", r) {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func githubRemoteRepo(raw string) string {
+	repo, _ := strictGitHubRemoteRepo(raw)
+	return repo
+}
+
+// strictGitHubRemoteRepo intentionally avoids a general URL parser. The
+// plugin only supports three exact GitHub remote spellings; accepting a broad
+// URL grammar would expand the attack surface (and historically exposed
+// standard-library URL parser bugs to untrusted repository configuration).
+func strictGitHubRemoteRepo(raw string) (string, bool) {
+	if raw == "" || !utf8.ValidString(raw) || strings.TrimSpace(raw) != raw || strings.ContainsAny(raw, "\r\n\x00") {
+		return "", false
+	}
+	var repo string
+	switch {
+	case strings.HasPrefix(raw, "https://github.com/"):
+		repo = strings.TrimPrefix(raw, "https://github.com/")
+	case strings.HasPrefix(raw, "ssh://git@github.com/"):
+		repo = strings.TrimPrefix(raw, "ssh://git@github.com/")
+	case strings.HasPrefix(raw, "git@github.com:"):
+		repo = strings.TrimPrefix(raw, "git@github.com:")
+	default:
+		return "", false
+	}
+	if strings.ContainsAny(repo, "?#\\:") || !validGitHubRepoPath(repo) {
+		return "", false
+	}
+	repo = strings.TrimSuffix(strings.TrimSuffix(repo, "/"), ".git")
+	return repo, true
+}
+
+func runGH(cwd string, args ...string) (string, bool) {
+	repo, ok := githubRepoForCwd(cwd)
+	if !ok {
+		return "", false
+	}
+	args = append(args, "--repo", repo)
+	return runWithEnv(cwd, "gh", secureShellEnvForDir(cwd), args...)
+}
+
+func ghCommand(cwd string, args ...string) (*exec.Cmd, bool) {
+	repo, ok := githubRepoForCwd(cwd)
+	if !ok {
+		return nil, false
+	}
+	args = append(args, "--repo", repo)
+	return commandWithEnv("gh", secureShellEnvForDir(cwd), args...), true
+}
+
+// runGit pins the Git settings that can turn an otherwise read-only helper
+// into a hook or external-protocol execution point in a hostile checkout.
+func runGit(cwd string, args ...string) (string, bool) {
+	gitArgs := []string{
+		"-c", "protocol.allow=never", "-c", "protocol.http.allow=always", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always",
+		"-c", "protocol.ext.allow=never", "-c", "protocol.file.allow=never", "-c", "protocol.git.allow=never",
+		"-c", "core.hooksPath=" + os.DevNull, "-c", "credential.helper=", "-c", "core.fsmonitor=false", "-c", "core.gitProxy=", "-c", "core.sshCommand=ssh", "-c", "ssh.variant=ssh",
+		"-c", "http.proxy=", "-c", "http.https://github.com/.proxy=", "-c", "http.extraHeader=", "-c", "http.https://github.com/.extraHeader=", "-c", "http.sslVerify=true",
+		"-c", "core.pager=cat", "-c", "remote.origin.uploadpack=git-upload-pack",
+	}
+	gitArgs = append(gitArgs, args...)
+	return runWithEnv(cwd, "git", secureShellEnvForDir(cwd), gitArgs...)
+}
+
 func prStatus(cwd string) Status { return prStatusNum(cwd, 0) }
 
 // prStatusNum fetches the current branch's PR (num=0) or a specific PR by number.
 func prStatusNum(cwd string, num int) Status {
-	branch, ok := run(cwd, "git", "rev-parse", "--abbrev-ref", "HEAD")
+	if num < 0 {
+		return Status{Repo: false}
+	}
+	branch, ok := runGit(cwd, "rev-parse", "--abbrev-ref", "HEAD")
 	if !ok {
 		return Status{Repo: false}
 	}
@@ -78,7 +216,7 @@ func prStatusNum(cwd string, num int) Status {
 	}
 	viewArgs = append(viewArgs, "--json",
 		"number,state,title,body,url,assignees,labels,files,additions,deletions,changedFiles,reviewDecision,headRefName")
-	viewRaw, ok := run(cwd, "gh", viewArgs...)
+	viewRaw, ok := runGH(cwd, viewArgs...)
 	if !ok {
 		return Status{Repo: true, Branch: branch}
 	}
@@ -86,10 +224,15 @@ func prStatusNum(cwd string, num int) Status {
 	if json.Unmarshal([]byte(viewRaw), &pr) != nil {
 		return Status{Repo: true, Branch: branch}
 	}
+	if !validPRNumber(pr.Number) || (num > 0 && pr.Number != num) {
+		return Status{Repo: true, Branch: branch}
+	}
 	if pr.State == "OPEN" {
 		checkArgs = append(checkArgs, "--json", "name,state,bucket")
-		if raw, ok := run(cwd, "gh", checkArgs...); ok {
-			json.Unmarshal([]byte(raw), &pr.Checks)
+		if raw, ok := runGH(cwd, checkArgs...); ok {
+			if err := json.Unmarshal([]byte(raw), &pr.Checks); err != nil {
+				pr.Checks = nil
+			}
 		}
 	}
 	if num > 0 && pr.HeadRefName != "" {
@@ -195,38 +338,47 @@ func listAgents() []Agent {
 
 func stateDir() string {
 	if d := os.Getenv("HERDR_PLUGIN_STATE_DIR"); d != "" {
-		return d
+		// Treat the override as a parent, not as the data directory itself. This
+		// prevents an accidental value such as /tmp from being chmodded private
+		// and keeps notes in a plugin-specific namespace.
+		if filepath.IsAbs(d) {
+			return filepath.Join(filepath.Clean(d), "herdr-gh-checks")
+		}
 	}
-	return os.TempDir()
+	if d, err := os.UserCacheDir(); err == nil && d != "" {
+		return filepath.Join(d, "herdr-gh-checks")
+	}
+	return filepath.Join(os.TempDir(), "herdr-gh-checks")
 }
 
 // one persistent review file per worktree branch
 func notesFileFor(branch string) string {
-	slug := strings.NewReplacer("/", "-", " ", "-").Replace(branch)
-	if slug == "" {
-		slug = "review"
-	}
-	return filepath.Join(stateDir(), "review-"+slug+".md")
+	return filepath.Join(stateDir(), notesNameForBranch(branch))
 }
 
-func seedNotes(path string, s Status) {
-	if _, err := os.Stat(path); err == nil {
-		return
+func seedNotes(path string, s Status) error {
+	if _, err := readPrivateFile(path); err == nil {
+		return nil
 	}
 	var b strings.Builder
 	num := 0
 	if s.PR != nil {
 		num = s.PR.Number
 	}
-	fmt.Fprintf(&b, "# Review — #%d %s\n", num, s.Branch)
+	fmt.Fprintf(&b, "# Review — #%d %s\n", num, sanitizeTerminalText(s.Branch))
 	b.WriteString("# Annotate below, e.g.:  app/models/x.rb:42  handle nil here\n# (lines starting with # are not sent)\n#\n# Changed files:\n")
 	if s.PR != nil {
 		for _, f := range s.PR.Files {
-			fmt.Fprintf(&b, "#   %s\n", f.Path)
+			fmt.Fprintf(&b, "#   %s\n", sanitizeTerminalText(f.Path))
 		}
 	}
 	b.WriteString("\n")
-	_ = os.WriteFile(path, []byte(b.String()), 0o644)
+	// O_EXCL prevents an existing link or note file from being overwritten.
+	err := createPrivateFile(path, []byte(b.String()))
+	if os.IsExist(err) {
+		return nil
+	}
+	return err
 }
 
 // loadNotes returns the annotation lines (no # guide/blank lines).
@@ -240,12 +392,12 @@ func loadNotes(branch string) []string {
 	return out
 }
 
-func writeNotes(branch string, lines []string) {
-	_ = os.WriteFile(notesFileFor(branch), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
+func writeNotes(branch string, lines []string) error {
+	return writePrivateFile(notesFileFor(branch), []byte(strings.Join(lines, "\n")+"\n"))
 }
 
 func readNotes(path string) string {
-	data, err := os.ReadFile(path)
+	data, err := readPrivateFile(path)
 	if err != nil {
 		return ""
 	}
@@ -267,7 +419,7 @@ type Workflow struct {
 }
 
 func listWorkflows(cwd string) []Workflow {
-	out, ok := run(cwd, "gh", "workflow", "list", "--json", "name,id,state")
+	out, ok := runGH(cwd, "workflow", "list", "--json", "name,id,state")
 	if !ok {
 		return nil
 	}
@@ -278,7 +430,14 @@ func listWorkflows(cwd string) []Workflow {
 
 // ponytail: gh errors if the workflow lacks a workflow_dispatch trigger; we just surface that.
 func runWorkflow(cwd string, id int, ref string) error {
-	c := exec.Command("gh", "workflow", "run", strconv.Itoa(id), "--ref", ref)
+	if id <= 0 || !safeGitRef(ref) {
+		return fmt.Errorf("refused unsafe workflow ref")
+	}
+	// #nosec G204 -- id is positive and ref is restricted by safeGitRef.
+	c, ok := ghCommand(cwd, "workflow", "run", strconv.Itoa(id), "--ref", ref)
+	if !ok {
+		return fmt.Errorf("repository remote is not a supported GitHub URL")
+	}
 	c.Dir = cwd
 	return c.Run()
 }
@@ -292,7 +451,7 @@ type Run struct {
 
 // latest run per workflow (gh run list is newest-first)
 func listRuns(cwd string) map[int]Run {
-	out, ok := run(cwd, "gh", "run", "list", "-L", "30", "--json", "workflowDatabaseId,status,conclusion")
+	out, ok := runGH(cwd, "run", "list", "-L", "30", "--json", "workflowDatabaseId,status,conclusion")
 	if !ok {
 		return nil
 	}
@@ -321,24 +480,32 @@ type PRItem struct {
 }
 
 func listPRs(cwd string) []PRItem {
-	out, ok := run(cwd, "gh", "pr", "list", "--limit", "30", "--json", "number,title,headRefName,reviewDecision,isDraft,author")
+	out, ok := runGH(cwd, "pr", "list", "--limit", "30", "--json", "number,title,headRefName,reviewDecision,isDraft,author")
 	if !ok {
 		return nil
 	}
 	var ps []PRItem
-	_ = json.Unmarshal([]byte(out), &ps)
-	return ps
+	if json.Unmarshal([]byte(out), &ps) != nil {
+		return nil
+	}
+	valid := ps[:0]
+	for _, p := range ps {
+		if validPRNumber(p.Number) {
+			valid = append(valid, p)
+		}
+	}
+	return valid
 }
 
 func listBranches(cwd string) []string {
-	out, ok := run(cwd, "git", "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/remotes/origin")
+	out, ok := runGit(cwd, "for-each-ref", "--sort=-committerdate", "--format=%(refname:short)", "refs/remotes/origin")
 	if !ok {
 		return nil
 	}
 	var b []string
 	for _, ln := range strings.Split(out, "\n") {
 		ln = strings.TrimPrefix(strings.TrimSpace(ln), "origin/")
-		if ln == "" || ln == "HEAD" {
+		if ln == "" || ln == "HEAD" || !safeGitRef(ln) {
 			continue
 		}
 		b = append(b, ln)

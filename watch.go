@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -18,6 +17,10 @@ import (
 )
 
 func trunc(s string, n int) string {
+	s = sanitizeTerminalText(s)
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
@@ -25,6 +28,10 @@ func trunc(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 func truncTail(s string, n int) string {
+	s = sanitizeTerminalText(s)
+	if n <= 0 {
+		return ""
+	}
 	r := []rune(s)
 	if len(r) <= n {
 		return s
@@ -39,38 +46,43 @@ type runsMsg map[int]Run
 type prListMsg []PRItem
 
 type model struct {
-	cwd       string
-	self      string // path to this binary, for the merge shell-out
-	status    Status
-	loaded    bool
-	cursor    int  // selected file in the FILES list
-	filtering bool // typing in the file filter
-	picking   bool // agent-picker modal open
-	agents    []Agent
-	pick      int
-	focus     int // 0 = PR/files list, 1 = Workflows list
-	workflows []Workflow
-	runs      map[int]Run // latest run status per workflow
-	wfpick    int
-	wfBranch  bool // branch-pick step of the workflow trigger
-	branches  []string
-	bpick     int
-	sent      string // last send status
-	updating  bool   // update-branch in flight
-	notesMode bool   // notes manager modal open
-	notes     []string
-	ncur      int
-	recap     string  // the annotated code line, for the selected note
-	folds     [4]bool // collapse Description / Checks / Files / Workflows
-	wfLoaded  bool    // workflows fetched once
-	width     int
-	sp        spinner.Model // bubbles/spinner drives all spinner frames
-	prog      progress.Model
-	ti        textinput.Model // file filter input
-	prPick    bool            // PR picker overlay (review other PRs)
-	prList    []PRItem
-	ppick     int
-	viewNum   int // >0 = viewing another PR (read-only rich view) instead of the branch's PR
+	cwd                 string
+	self                string // path to this binary, for the merge shell-out
+	status              Status
+	loaded              bool
+	cursor              int  // selected file in the FILES list
+	filtering           bool // typing in the file filter
+	picking             bool // agent-picker modal open
+	agents              []Agent
+	pick                int
+	focus               int // 0 = PR/files list, 1 = Workflows list
+	workflows           []Workflow
+	runs                map[int]Run // latest run status per workflow
+	wfpick              int
+	wfBranch            bool // branch-pick step of the workflow trigger
+	branches            []string
+	bpick               int
+	sent                string // last send status
+	updating            bool   // update-branch in flight
+	notesMode           bool   // notes manager modal open
+	notes               []string
+	ncur                int
+	recap               string  // the annotated code line, for the selected note
+	folds               [4]bool // collapse Description / Checks / Files / Workflows
+	wfLoaded            bool    // workflows fetched once
+	width               int
+	sp                  spinner.Model // bubbles/spinner drives all spinner frames
+	prog                progress.Model
+	ti                  textinput.Model // file filter input
+	prPick              bool            // PR picker overlay (review other PRs)
+	prList              []PRItem
+	ppick               int
+	viewNum             int    // >0 = viewing another PR (read-only rich view) instead of the branch's PR
+	confirmAction       string // explicit confirmation modal for remote mutations
+	confirmNumber       int
+	confirmRef          string
+	confirmFromPRPicker bool
+	confirmTitle        string
 }
 
 func newModel(cwd string) model {
@@ -117,7 +129,7 @@ func (m model) prPickerView() string {
 	}
 	for i := start; i < end; i++ {
 		pr := m.prList[i]
-		label := dim.Render(fmt.Sprintf("#%d", pr.Number)) + " " + prDecision(pr.ReviewDecision) + " " + trunc(pr.Title, w-26) + "  " + dim.Render("@"+pr.Author.Login)
+		label := dim.Render(fmt.Sprintf("#%d", pr.Number)) + " " + prDecision(pr.ReviewDecision) + " " + trunc(pr.Title, w-26) + "  " + dim.Render("@"+sanitizeTerminalText(pr.Author.Login))
 		if pr.IsDraft {
 			label = dim.Render("draft ") + label
 		}
@@ -128,6 +140,37 @@ func (m model) prPickerView() string {
 		}
 	}
 	L = append(L, "", "  "+dim.Render("↑↓ pick · ⏎ view diff · a approve · r review · c comment · o web · esc back"))
+	return strings.Join(L, "\n")
+}
+
+func (m model) confirmView() string {
+	title := ""
+	if m.confirmAction == "workflow" {
+		title = m.confirmTitle
+	} else if m.confirmAction == "approve" && m.confirmNumber > 0 {
+		if m.status.PR != nil && m.status.PR.Number == m.confirmNumber {
+			title = m.status.PR.Title
+		} else {
+			for _, pr := range m.prList {
+				if pr.Number == m.confirmNumber {
+					title = pr.Title
+					break
+				}
+			}
+		}
+	}
+	action := "update the current branch with its base branch"
+	if m.confirmAction == "approve" {
+		action = fmt.Sprintf("approve PR #%d", m.confirmNumber)
+	} else if m.confirmAction == "workflow" {
+		action = fmt.Sprintf("run workflow #%d on %s", m.confirmNumber, m.confirmRef)
+	}
+	L := []string{"", "  " + sect.Render("CONFIRM REMOTE ACTION"), ""}
+	L = append(L, "  "+bold.Render(sanitizeTerminalText(action)))
+	if title != "" {
+		L = append(L, "  "+dim.Render(trunc(title, 72)))
+	}
+	L = append(L, "", "  "+yellow.Render("This changes GitHub state."), "", "  "+cyan.Render("y/enter")+" confirm    "+dim.Render("n/esc cancel"))
 	return strings.Join(L, "\n")
 }
 
@@ -143,9 +186,9 @@ func (m model) runBadge(id int, frame string) string {
 		if r.Conclusion == "success" {
 			return "  " + green.Render("✓")
 		}
-		return "  " + red.Render("✗ "+r.Conclusion)
+		return "  " + red.Render("✗ "+sanitizeTerminalText(r.Conclusion))
 	}
-	return "  " + yellow.Render(frame+" "+r.Status)
+	return "  " + yellow.Render(frame+" "+sanitizeTerminalText(r.Status))
 }
 
 type sentMsg string
@@ -181,13 +224,47 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prog.Width = w
 	case sentMsg:
 		wasUpdating := m.updating
-		m.sent = string(msg)
+		m.sent = sanitizeTerminalText(string(msg))
 		m.updating = false
 		if wasUpdating { // after update-branch, refresh state (behind→clean, new checks)
 			return m, fetchCmd(m.cwd, m.viewNum)
 		}
 		return m, nil
 	case tea.KeyMsg:
+		if m.confirmAction != "" {
+			switch msg.String() {
+			case "esc", "q", "n":
+				m.confirmAction = ""
+				m.confirmNumber = 0
+				m.confirmRef = ""
+				m.confirmFromPRPicker = false
+				m.confirmTitle = ""
+			case "y", "enter":
+				action, number, ref, title := m.confirmAction, m.confirmNumber, m.confirmRef, m.confirmTitle
+				fromPicker := m.confirmFromPRPicker
+				m.confirmAction, m.confirmNumber, m.confirmRef, m.confirmFromPRPicker, m.confirmTitle = "", 0, "", false, ""
+				if action == "approve" {
+					if fromPicker {
+						m.prPick = false
+					}
+					return m, m.approvePR(number)
+				}
+				if action == "update" {
+					m.updating = true
+					m.sent = ""
+					return m, m.updateBranch(number)
+				}
+				if action == "workflow" {
+					return m, func() tea.Msg {
+						if err := runWorkflow(m.cwd, number, ref); err != nil {
+							return sentMsg("trigger failed: " + sanitizeTerminalText(title))
+						}
+						return sentMsg("triggered " + sanitizeTerminalText(title) + " on " + sanitizeTerminalText(ref))
+					}
+				}
+			}
+			return m, nil
+		}
 		if m.notesMode { // notes manager: navigate, x delete, e edit
 			switch msg.String() {
 			case "esc", "q":
@@ -203,7 +280,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "x", "d":
 				if m.ncur < len(m.notes) {
 					m.notes = append(m.notes[:m.ncur], m.notes[m.ncur+1:]...)
-					writeNotes(m.status.Branch, m.notes)
+					if err := writeNotes(m.status.Branch, m.notes); err != nil {
+						m.sent = "notes write refused: " + sanitizeTerminalText(err.Error())
+					}
 					if m.ncur >= len(m.notes) && m.ncur > 0 {
 						m.ncur--
 					}
@@ -231,12 +310,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.wfpick < len(m.workflows) && m.bpick < len(m.branches) {
 					wf, ref := m.workflows[m.wfpick], m.branches[m.bpick]
 					m.wfBranch = false
-					return m, func() tea.Msg {
-						if err := runWorkflow(m.cwd, wf.ID, ref); err != nil {
-							return sentMsg("trigger failed: " + wf.Name)
-						}
-						return sentMsg("triggered " + wf.Name + " on " + ref)
-					}
+					m.confirmAction = "workflow"
+					m.confirmNumber = wf.ID
+					m.confirmRef = ref
+					m.confirmTitle = wf.Name
 				}
 			}
 			return m, nil
@@ -254,19 +331,24 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.ppick++
 				}
 			case "o":
-				if m.ppick < len(m.prList) {
-					c := exec.Command("gh", "pr", "view", strconv.Itoa(m.prList[m.ppick].Number), "--web")
+				if m.ppick < len(m.prList) && validPRNumber(m.prList[m.ppick].Number) {
+					// #nosec G204 -- PR number is an integer; no shell is involved.
+					c, ok := ghCommand(m.cwd, "pr", "view", strconv.Itoa(m.prList[m.ppick].Number), "--web")
+					if !ok {
+						break
+					}
 					c.Dir = m.cwd
 					_ = c.Start()
 				}
-			case "a": // quick approve, no body
-				if m.ppick < len(m.prList) {
+			case "a": // approve after an explicit confirmation
+				if m.ppick < len(m.prList) && validPRNumber(m.prList[m.ppick].Number) {
 					n := m.prList[m.ppick].Number
-					m.prPick = false
-					return m, m.approvePR(n)
+					m.confirmAction = "approve"
+					m.confirmNumber = n
+					m.confirmFromPRPicker = true
 				}
 			case "enter", "v": // open the PR in the full rich pane (looks like your current PR)
-				if m.ppick < len(m.prList) {
+				if m.ppick < len(m.prList) && validPRNumber(m.prList[m.ppick].Number) {
 					m.viewNum = m.prList[m.ppick].Number
 					m.prPick = false
 					m.loaded = false
@@ -274,13 +356,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, fetchCmd(m.cwd, m.viewNum)
 				}
 			case "r": // submit a review: approve / comment / request-changes + body
-				if m.ppick < len(m.prList) {
+				if m.ppick < len(m.prList) && validPRNumber(m.prList[m.ppick].Number) {
 					n := m.prList[m.ppick].Number
 					m.prPick = false
 					return m, m.ghInteractive("review", n)
 				}
 			case "c": // plain comment (editor)
-				if m.ppick < len(m.prList) {
+				if m.ppick < len(m.prList) && validPRNumber(m.prList[m.ppick].Number) {
 					n := m.prList[m.ppick].Number
 					m.prPick = false
 					return m, m.ghInteractive("comment", n)
@@ -300,7 +382,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "p":
 				return m, prListCmd(m.cwd)
 			case "a":
-				return m, m.approvePR(m.viewNum)
+				m.confirmAction = "approve"
+				m.confirmNumber = m.viewNum
 			case "r":
 				return m, m.ghInteractive("review", m.viewNum)
 			case "c":
@@ -312,7 +395,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.annotateFile(ff[m.cursor].Path, m.viewNum)
 				}
 			case "o":
-				c := exec.Command("gh", "pr", "view", strconv.Itoa(m.viewNum), "--web")
+				// #nosec G204 -- PR number is an integer; no shell is involved.
+				c, ok := ghCommand(m.cwd, "pr", "view", strconv.Itoa(m.viewNum), "--web")
+				if !ok {
+					break
+				}
 				c.Dir = m.cwd
 				_ = c.Start()
 			case "up", "k":
@@ -390,13 +477,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "m": // suspend the TUI, run the interactive merge, resume + refetch
 			if m.self != "" && m.status.PR != nil && m.status.PR.State == "OPEN" {
-				c := exec.Command(m.self, "--merge")
-				c.Env = append(os.Environ(), "CI_CWD="+m.cwd)
+				// #nosec G204 -- m.self comes from os.Executable and is not shell-evaluated.
+				env := secureShellEnvForDir(m.cwd)
+				env = append(env, "CI_CWD="+m.cwd)
+				c := commandWithEnv(m.self, env, "--merge")
+				c.Env = env
 				return m, tea.ExecProcess(c, func(error) tea.Msg { return reloadMsg{} })
 			}
 		case "o": // open the PR on the web
 			if m.status.PR != nil {
-				c := exec.Command("gh", "pr", "view", "--web")
+				c, ok := ghCommand(m.cwd, "pr", "view", "--web")
+				if !ok {
+					break
+				}
 				c.Dir = m.cwd
 				_ = c.Start()
 			}
@@ -406,9 +499,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "u": // update branch with latest base branch
 			if m.status.PR != nil && m.status.PR.State == "OPEN" {
-				m.updating = true
-				m.sent = ""
-				return m, m.updateBranch()
+				m.confirmAction = "update"
+				m.confirmNumber = m.status.PR.Number
 			}
 		case "1":
 			m.folds[0] = !m.folds[0]
@@ -430,7 +522,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				ws := os.Getenv("HERDR_WORKSPACE_ID")
 				m.agents = nil
 				for _, a := range listAgents() {
-					if ws == "" || a.WorkspaceID == ws {
+					// Never offer a pane from an unknown workspace: review notes can
+					// contain private source details and are sent verbatim to agents.
+					if ws != "" && a.WorkspaceID == ws {
 						m.agents = append(m.agents, a)
 					}
 				}
@@ -584,7 +678,7 @@ func (m model) pickerView() string {
 		case "unknown", "":
 			st = dim
 		}
-		label := bold.Render(a.Kind) + "  " + st.Render("● "+a.Status) + "  " + dim.Render(a.PaneID)
+		label := bold.Render(sanitizeTerminalText(a.Kind)) + "  " + st.Render("● "+sanitizeTerminalText(a.Status)) + "  " + dim.Render(sanitizeTerminalText(a.PaneID))
 		if i == m.pick {
 			L = append(L, "  "+cyan.Render("› ")+label)
 		} else {
@@ -609,7 +703,7 @@ func codeLineAt(cwd, note string) string {
 	if err != nil || n < 1 {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(cwd, loc[:c]))
+	data, err := readRepoFile(cwd, loc[:c])
 	if err != nil {
 		return ""
 	}
@@ -666,7 +760,7 @@ func (m model) notesView() string {
 func (m model) wfBranchView() string {
 	wf := ""
 	if m.wfpick < len(m.workflows) {
-		wf = m.workflows[m.wfpick].Name
+		wf = sanitizeTerminalText(m.workflows[m.wfpick].Name)
 	}
 	L := []string{"", "  " + sect.Render("RUN ON BRANCH"), "  " + dim.Render(wf), ""}
 	const win = 15
@@ -679,7 +773,7 @@ func (m model) wfBranchView() string {
 		end = len(m.branches)
 	}
 	for i := start; i < end; i++ {
-		b := m.branches[i]
+		b := sanitizeTerminalText(m.branches[i])
 		mark := ""
 		if b == m.status.Branch {
 			mark = dim.Render(" (current)")
@@ -716,9 +810,9 @@ func (m model) workflowContent(frame string) []string {
 			}
 			badge := m.runBadge(wf.ID, frame)
 			if m.focus == 1 && i == m.wfpick {
-				c = append(c, "  "+cyan.Render("› ")+st.Render("●")+" "+wf.Name+badge)
+				c = append(c, "  "+cyan.Render("› ")+st.Render("●")+" "+sanitizeTerminalText(wf.Name)+badge)
 			} else {
-				c = append(c, "    "+st.Render("●")+" "+dim.Render(wf.Name)+badge)
+				c = append(c, "    "+st.Render("●")+" "+dim.Render(sanitizeTerminalText(wf.Name))+badge)
 			}
 		}
 		c = append(c, "  "+dim.Render("⏎ run · v watch · tab back to files"))
@@ -727,6 +821,9 @@ func (m model) workflowContent(frame string) []string {
 }
 
 func (m model) View() string {
+	if m.confirmAction != "" {
+		return m.confirmView()
+	}
 	if m.prPick {
 		return m.prPickerView()
 	}
@@ -748,7 +845,7 @@ func (m model) View() string {
 		return "\n  " + dim.Render("not a git repository")
 	}
 	if s.PR == nil {
-		L := []string{"", "  " + bold.Render(s.Branch), "", "  " + dim.Render("no open PR for this branch") + "  " + dim.Render("· p review other PRs")}
+		L := []string{"", "  " + bold.Render(sanitizeTerminalText(s.Branch)), "", "  " + dim.Render("no open PR for this branch") + "  " + dim.Render("· p review other PRs")}
 		if wc := m.workflowContent(frame); len(wc) > 0 {
 			L = append(L, "")
 			for _, ln := range wc {
@@ -776,7 +873,7 @@ func (m model) View() string {
 	} else if p.State == "CLOSED" {
 		pillBg = "124"
 	}
-	pill := lipgloss.NewStyle().Background(lipgloss.Color(pillBg)).Foreground(lipgloss.Color("15")).Bold(true).Padding(0, 1).Render(p.State)
+	pill := lipgloss.NewStyle().Background(lipgloss.Color(pillBg)).Foreground(lipgloss.Color("15")).Bold(true).Padding(0, 1).Render(sanitizeTerminalText(p.State))
 	review := ""
 	if p.State == "OPEN" {
 		switch p.ReviewDecision {
@@ -792,7 +889,7 @@ func (m model) View() string {
 		add(mauve.Render("▶ viewing PR #"+strconv.Itoa(m.viewNum)) + dim.Render("  · esc to return to your PR"))
 		blank()
 	}
-	head := pill + " " + bold.Render(fmt.Sprintf("#%d", p.Number)) + " " + dim.Render(s.Branch)
+	head := pill + " " + bold.Render(fmt.Sprintf("#%d", p.Number)) + " " + dim.Render(sanitizeTerminalText(s.Branch))
 	if review != "" {
 		head += dim.Render("   · " + review)
 	}
@@ -828,7 +925,7 @@ func (m model) View() string {
 			if c == "" {
 				c = "888888"
 			}
-			parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color("#"+c)).Render("●")+" "+l.Name)
+			parts = append(parts, lipgloss.NewStyle().Foreground(lipgloss.Color("#"+safeLabelColor(c))).Render("●")+" "+sanitizeTerminalText(l.Name))
 		}
 		chips = strings.Join(parts, "  ")
 	}
@@ -837,7 +934,7 @@ func (m model) View() string {
 	if len(p.Assignees) > 0 {
 		var as []string
 		for _, a := range p.Assignees {
-			as = append(as, "@"+a.Login)
+			as = append(as, "@"+sanitizeTerminalText(a.Login))
 		}
 		who = strings.Join(as, " ")
 	}
@@ -890,7 +987,7 @@ func (m model) View() string {
 			}
 			for i, c := range cs {
 				ic, st := checkGlyph(c.Bucket, frame)
-				row := "  " + st.Render(ic) + " " + c.Name
+				row := "  " + st.Render(ic) + " " + sanitizeTerminalText(c.Name)
 				if i == 0 {
 					row += "   " + pr.View()
 				}
@@ -968,7 +1065,7 @@ func (m model) View() string {
 	if m.viewNum > 0 {
 		add(dim.Render("↑↓ files · ⏎ annotate (ga) · d diff · a approve · r review · c comment · o web · esc back"))
 	} else if settled(s) {
-		add(dim.Render(strings.ToLower(p.State)+" · not watching") + "    " + openHint)
+		add(dim.Render(strings.ToLower(sanitizeTerminalText(p.State))+" · not watching") + "    " + openHint)
 	} else {
 		btn := lipgloss.NewStyle().Background(lipgloss.Color("28")).Foreground(lipgloss.Color("15")).Bold(true).Padding(0, 1).Render(" Merge PR")
 		add(cyan.Render(frame) + " " + dim.Render("live · 5s") + "    " + cap("m") + btn + "   " + openHint)
@@ -1006,6 +1103,19 @@ func fileIcon(p string) string {
 	return "" // generic file
 }
 
+func safeLabelColor(c string) string {
+	c = strings.TrimPrefix(strings.TrimSpace(c), "#")
+	if len(c) != 6 {
+		return "888888"
+	}
+	for _, r := range c {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return "888888"
+		}
+	}
+	return c
+}
+
 func checkGlyph(bucket, frame string) (string, lipgloss.Style) {
 	switch bucket {
 	case "pass":
@@ -1030,6 +1140,7 @@ var (
 )
 
 func mdInline(s string) string {
+	s = sanitizeTerminalText(s)
 	s = mdBoldRe.ReplaceAllStringFunc(s, func(m string) string { return bold.Render(strings.Trim(m, "*_")) })
 	s = mdCodeRe.ReplaceAllStringFunc(s, func(m string) string { return cyan.Render(strings.Trim(m, "`")) })
 	return s

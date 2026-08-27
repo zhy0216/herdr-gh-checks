@@ -6,15 +6,25 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          go-version: "1.25"
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          # Use the current patched toolchain for release binaries; the module
+          # remains source-compatible with Go 1.25.14+.
+          go-version: "1.27.0"
 
       - name: Cross-compile binaries
         run: |
@@ -25,15 +35,21 @@ jobs:
             os=${target%/*}; arch=${target#*/}
             ext=""; [ "$os" = windows ] && ext=".exe"
             out="${bin}-${os}-${arch}${ext}"
-            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w" -o "dist/$out" .
+            CGO_ENABLED=0 GOTOOLCHAIN=local GOOS=$os GOARCH=$arch go build -buildvcs=true -trimpath -ldflags "-s -w -buildid=" -o "dist/$out" .
             ( cd dist && sha256sum "$out" | awk '{print $1}' > "$out.sha256" )
           done
           ls -la dist
+
+      - name: Attest release assets
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: "dist/herdr-gh-checks-*"
 
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
-          gh release create "$GITHUB_REF_NAME" dist/* --title "$GITHUB_REF_NAME" --generate-notes \
-            || gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          # An existing release is an error. Never replace an asset in place:
+          # doing so would invalidate the installer's reviewed digest allowlist.
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --generate-notes

@@ -1,8 +1,11 @@
 package main
 
 import (
+	"os/exec"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func TestPRRefShell(t *testing.T) {
@@ -11,8 +14,17 @@ func TestPRRefShell(t *testing.T) {
 		t.Fatalf("num=0 should use HEAD, no fetch of pull/, no cleanup: %q", cur)
 	}
 	pr := prRefShell(7)
-	if !strings.Contains(pr, `pull/$NUM/head:refs/ci/pr`) || !strings.Contains(pr, "head=refs/ci/pr") || !strings.Contains(prRefCleanup(7), "update-ref -d refs/ci/pr") {
-		t.Fatalf("num>0 should fetch pull head into refs/ci/pr and clean it up: %q", pr)
+	if !strings.Contains(pr, `pull/$NUM/head:$REVIEW_REF`) || !strings.Contains(pr, "head=$REVIEW_REF") || !strings.Contains(pr, "trap cleanup_review_ref EXIT") || !strings.Contains(prRefCleanup(7), "cleanup_review_ref") {
+		t.Fatalf("num>0 should fetch pull head into a temporary ref and clean it up: %q", pr)
+	}
+}
+
+func TestPRRefShellSyntax(t *testing.T) {
+	for _, num := range []int{0, 7} {
+		script := prRefShell(num) + `; printf '%s' "$head"` + prRefCleanup(num)
+		if out, err := exec.Command("sh", "-n", "-c", script).CombinedOutput(); err != nil {
+			t.Fatalf("num=%d shell syntax: %v (%s)", num, err, out)
+		}
 	}
 }
 
@@ -51,4 +63,25 @@ func TestLogic(t *testing.T) {
 	eq(stateOf(Status{Repo: true, PR: &PR{State: "OPEN", Checks: []Check{{Bucket: "pending"}}}}), "run", "run")
 	eq(trunc("hello", 3), "he…", "trunc")
 	eq(truncTail("abcdef", 3), "…ef", "truncTail")
+}
+
+func TestWorkflowRequiresConfirmation(t *testing.T) {
+	m := newModel("")
+	m.loaded = true
+	m.width = 80
+	m.status = Status{Repo: true, Branch: "main", PR: &PR{Number: 1, State: "OPEN"}}
+	m.workflows = []Workflow{{ID: 42, Name: "deploy", State: "active"}}
+	m.branches = []string{"main"}
+	m.focus = 1
+	modelAfter, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got := modelAfter.(model)
+	// Enter first opens the branch picker; it must not dispatch yet.
+	if !got.wfBranch || got.confirmAction != "" {
+		t.Fatalf("workflow branch picker state = %+v", got)
+	}
+	modelAfter, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = modelAfter.(model)
+	if got.confirmAction != "workflow" || got.confirmNumber != 42 || got.confirmRef != "main" {
+		t.Fatalf("workflow confirmation state = %+v", got)
+	}
 }

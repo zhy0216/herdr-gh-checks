@@ -19,24 +19,111 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           # Use the current patched toolchain for release binaries; the module
           # remains source-compatible with Go 1.25.14+.
-          go-version: "1.27.0"
+          go-version: "1.27.1"
+
+      - name: Validate release tag and source
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          version_lines=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' herdr-plugin.toml | wc -l | tr -d '[:space:]')
+          if [ "$version_lines" -ne 1 ]; then
+            echo "herdr-plugin.toml must contain exactly one version" >&2
+            exit 1
+          fi
+          version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' herdr-plugin.toml)
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tag must be strict vMAJOR.MINOR.PATCH: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "release tag $GITHUB_REF_NAME does not match manifest version v$version" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/$DEFAULT_BRANCH"; then
+            echo "release commit $GITHUB_SHA is not on origin/$DEFAULT_BRANCH" >&2
+            exit 1
+          fi
+
+      - name: Verify source
+        shell: bash
+        env:
+          GOTOOLCHAIN: local
+        run: |
+          set -euo pipefail
+          go mod verify
+          go mod tidy -diff
+          go_file_count=$(git ls-files '*.go' | wc -l | tr -d '[:space:]')
+          if [ "$go_file_count" -eq 0 ]; then
+            echo "no tracked Go files found" >&2
+            exit 1
+          fi
+          unformatted=$(
+            while IFS= read -r go_file; do
+              gofmt -l "$go_file"
+            done < <(git ls-files '*.go')
+          )
+          if [ -n "$unformatted" ]; then
+            echo "gofmt is required for:" >&2
+            printf '%s\n' "$unformatted" >&2
+            exit 1
+          fi
+          go test -race ./...
+          go vet ./...
 
       - name: Cross-compile binaries
+        shell: bash
         run: |
-          set -eu
+          set -euo pipefail
           bin=herdr-gh-checks
           mkdir -p dist
           for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
             os=${target%/*}; arch=${target#*/}
-            ext=""; [ "$os" = windows ] && ext=".exe"
+            ext=""
+            if [ "$os" = windows ]; then
+              ext=".exe"
+            fi
             out="${bin}-${os}-${arch}${ext}"
             CGO_ENABLED=0 GOTOOLCHAIN=local GOOS=$os GOARCH=$arch go build -buildvcs=true -trimpath -ldflags "-s -w -buildid=" -o "dist/$out" .
-            ( cd dist && sha256sum "$out" | awk '{print $1}' > "$out.sha256" )
+            digest=$(sha256sum "dist/$out" | awk '{print $1}')
+            printf '%s\n' "$digest" > "dist/$out.sha256"
+          done
+
+      - name: Validate release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          assets=(
+            herdr-gh-checks-linux-amd64
+            herdr-gh-checks-linux-arm64
+            herdr-gh-checks-darwin-amd64
+            herdr-gh-checks-darwin-arm64
+            herdr-gh-checks-windows-amd64.exe
+            herdr-gh-checks-windows-arm64.exe
+          )
+          file_count=$(find dist -maxdepth 1 -type f | wc -l | tr -d '[:space:]')
+          if [ "$file_count" -ne 12 ]; then
+            echo "expected exactly 6 binaries and 6 checksum sidecars; found $file_count files" >&2
+            exit 1
+          fi
+          for asset in "${assets[@]}"; do
+            if [ ! -s "dist/$asset" ] || [ ! -s "dist/$asset.sha256" ]; then
+              echo "missing or empty release asset: $asset" >&2
+              exit 1
+            fi
+            expected=$(tr -d '\r\n' < "dist/$asset.sha256")
+            actual=$(sha256sum "dist/$asset" | awk '{print $1}')
+            if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]] || [ "$expected" != "$actual" ]; then
+              echo "checksum validation failed for $asset" >&2
+              exit 1
+            fi
           done
           ls -la dist
 
@@ -52,4 +139,8 @@ jobs:
           set -eu
           # An existing release is an error. Never replace an asset in place:
           # doing so would invalidate the installer's reviewed digest allowlist.
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --fail-on-no-commits \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

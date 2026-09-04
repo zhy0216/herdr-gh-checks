@@ -1,6 +1,12 @@
-# Allowlisted SHA-256 digests for release assets. The installer never trusts
-# Update this file in the same reviewed change as herdr-plugin.toml when
-# publishing a new hardened version. No legacy v0.2.2 assets are allowlisted:
-# they predate the security fixes and must never be selected by a downgrade or
-# a modified local manifest. Until v0.2.3 release assets are built and reviewed,
-# installers intentionally compile the current source instead.
+# Allowlisted SHA-256 digests for release assets. The installer never treats a
+# release's adjacent .sha256 sidecar as an authority.
+#
+# Releases intentionally use two reviewed stages because release binaries embed
+# the tagged commit ID: first publish and attest the tag's assets, then verify
+# the downloaded binaries and add their digests here in a follow-up commit while
+# the manifest still names that version. Never auto-merge the digest update.
+#
+# No legacy v0.2.2 assets are allowlisted: they predate the security fixes and
+# must never be selected by a downgrade or a modified local manifest. Until the
+# v0.2.3 assets are published, verified, and recorded here, installers
+# intentionally compile the current source instead.

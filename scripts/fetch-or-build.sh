@@ -13,7 +13,7 @@ case "$script_path" in
   */*) script_dir=${script_path%/*}; [ -n "$script_dir" ] || script_dir=/ ;;
   *) script_dir=. ;;
 esac
-root=$(CDPATH= cd "$script_dir/.." && pwd -P)
+root=$(CDPATH='' cd "$script_dir/.." && pwd -P)
 
 # Never let a relative PATH entry (especially `.`) resolve helper commands from
 # the checkout itself. A hostile tree could otherwise shadow git/curl/go before
@@ -34,7 +34,7 @@ for path_entry in ${PATH-}; do
         "$root"|"$root"/*) inside=1 ;;
         *)
           if [ -d "$path_entry" ]; then
-            resolved=$(CDPATH= cd "$path_entry" 2>/dev/null && pwd -P) || resolved=
+            resolved=$(CDPATH='' cd "$path_entry" 2>/dev/null && pwd -P) || resolved=
             case "$resolved" in
               "$root"|"$root"/*) inside=1 ;;
             esac
@@ -75,6 +75,7 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' herdr-plugin.toml | head -1)
 tmp=
 build_tmp=
 
+# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
 cleanup() {
   [ -z "${build_tmp:-}" ] || rm -f -- "$build_tmp"
   [ -z "${tmp:-}" ] || rm -rf -- "$tmp"
@@ -166,7 +167,9 @@ build_from_source() {
   exit 1
 }
 
-[ -n "$os" ] && [ -n "$arch" ] && [ -n "$version" ] && command -v curl >/dev/null 2>&1 || build_from_source
+if [ -z "$os" ] || [ -z "$arch" ] || [ -z "$version" ] || ! command -v curl >/dev/null 2>&1; then
+  build_from_source
+fi
 if ! printf '%s' "$version" | LC_ALL=C grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
   echo "herdr-gh-checks: invalid manifest version; building from source" >&2
   build_from_source

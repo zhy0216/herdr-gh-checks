@@ -75,12 +75,7 @@ version=$(sed -n 's/^version = "\(.*\)"/\1/p' herdr-plugin.toml | head -1)
 tmp=
 build_tmp=
 
-# shellcheck disable=SC2329 # Invoked indirectly by the EXIT trap.
-cleanup() {
-  [ -z "${build_tmp:-}" ] || rm -f -- "$build_tmp"
-  [ -z "${tmp:-}" ] || rm -rf -- "$tmp"
-}
-trap cleanup EXIT
+trap '[ -z "${build_tmp:-}" ] || rm -f -- "$build_tmp"; [ -z "${tmp:-}" ] || rm -rf -- "$tmp"' EXIT
 
 source_repo_matches() {
   # A checkout with Git metadata must identify the same canonical repository as

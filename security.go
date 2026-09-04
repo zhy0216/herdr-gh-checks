@@ -667,7 +667,7 @@ func unsafeInheritedEnvKey(key string) bool {
 	if strings.HasPrefix(upper, "GIT_") {
 		return true
 	}
-	if runtime.GOOS != "windows" && (strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_")) {
+	if strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") {
 		return true
 	}
 	switch upper {

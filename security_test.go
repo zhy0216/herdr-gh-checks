@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -109,7 +110,9 @@ func TestPrivateNotesFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Windows reports synthetic POSIX mode bits; confidentiality there comes
+	// from the inherited per-user profile ACL documented by the plugin.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("notes permissions = %o, want 600", info.Mode().Perm())
 	}
 	if err := writeNotes(dir, status, []string{"src/a.go:1  note"}); err != nil {
@@ -326,7 +329,7 @@ func TestReviewVimPathUsesEmbeddedScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("cached review script permissions = %o, want 600", info.Mode().Perm())
 	}
 	// A writable adjacent file or HERDR_PLUGIN_ROOT override cannot change the

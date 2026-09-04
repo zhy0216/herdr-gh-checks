@@ -99,7 +99,8 @@ func TestReadRepoFileRejectsTraversalAndSymlink(t *testing.T) {
 func TestPrivateNotesFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HERDR_PLUGIN_STATE_DIR", filepath.Join(dir, "state"))
-	path := notesFileFor("../../feature/secret")
+	status := Status{Repo: true, Branch: "../../feature/secret", PR: &PR{Number: 7}}
+	path := notesFileFor(dir, status)
 	if strings.Contains(path, "feature") || strings.Contains(path, "secret") {
 		t.Fatalf("branch leaked into notes filename: %s", path)
 	}
@@ -111,7 +112,7 @@ func TestPrivateNotesFile(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("notes permissions = %o, want 600", info.Mode().Perm())
 	}
-	if err := writeNotes("../../feature/secret", []string{"src/a.go:1  note"}); err != nil {
+	if err := writeNotes(dir, status, []string{"src/a.go:1  note"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := writePrivateFile(path, bytes.Repeat([]byte{'x'}, maxNotesBytes+1)); !errors.Is(err, errUnsafePath) {
@@ -124,7 +125,10 @@ func TestPrivateNotesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(filepath.Join(dir, "outside"), path); err == nil {
-		if err := writeNotes("../../feature/secret", []string{"should not write"}); err == nil {
+		if err := seedNotes(path, status); err == nil {
+			t.Fatal("symlink notes target was accepted as an existing note")
+		}
+		if err := writeNotes(dir, status, []string{"should not write"}); err == nil {
 			t.Fatal("symlink notes target was accepted")
 		}
 	}

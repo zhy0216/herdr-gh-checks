@@ -39,7 +39,11 @@ func truncTail(s string, n int) string {
 	return "…" + string(r[len(r)-(n-1):])
 }
 
-type fetchMsg Status
+type fetchMsg struct {
+	status     Status
+	number     int
+	generation uint64
+}
 type workflowsMsg []Workflow
 type reloadMsg struct{} // after an external process exits, refetch ASYNC (prStatus is ~2.4s; never in an ExecProcess callback on the main loop)
 type runsMsg map[int]Run
@@ -63,6 +67,7 @@ type model struct {
 	branches            []string
 	bpick               int
 	sent                string // last send status
+	sentFailed          bool   // the last action failed and must not be rendered as success
 	updating            bool   // update-branch in flight
 	notesMode           bool   // notes manager modal open
 	notes               []string
@@ -83,6 +88,7 @@ type model struct {
 	confirmRef          string
 	confirmFromPRPicker bool
 	confirmTitle        string
+	fetchGeneration     uint64 // invalidates in-flight status requests after a target/reload change
 }
 
 func newModel(cwd string) model {
@@ -96,7 +102,12 @@ func newModel(cwd string) model {
 	ti.Placeholder = "filter"
 	ti.CharLimit = 80
 	ti.Width = 24
-	return model{cwd: cwd, self: self, sp: sp, prog: pr, ti: ti}
+	return model{cwd: cwd, self: self, sp: sp, prog: pr, ti: ti, fetchGeneration: 1}
+}
+
+func (m *model) refreshStatus() tea.Cmd {
+	m.fetchGeneration++
+	return fetchCmd(m.cwd, m.viewNum, m.fetchGeneration)
 }
 
 func prDecision(d string) string {
@@ -174,7 +185,9 @@ func (m model) confirmView() string {
 	return strings.Join(L, "\n")
 }
 
-func (m model) Init() tea.Cmd { return tea.Batch(fetchCmd(m.cwd, 0), runsCmd(m.cwd), m.sp.Tick) }
+func (m model) Init() tea.Cmd {
+	return tea.Batch(fetchCmd(m.cwd, 0, m.fetchGeneration), runsCmd(m.cwd), m.sp.Tick)
+}
 
 // runBadge is the workflow's latest-run status inline in the section (spinner while running).
 func (m model) runBadge(id int, frame string) string {
@@ -191,7 +204,14 @@ func (m model) runBadge(id int, frame string) string {
 	return "  " + yellow.Render(frame+" "+sanitizeTerminalText(r.Status))
 }
 
-type sentMsg string
+type sentMsg struct {
+	text   string
+	failed bool
+}
+
+func successMsg(text string) sentMsg { return sentMsg{text: text} }
+
+func failureMsg(text string) sentMsg { return sentMsg{text: text, failed: true} }
 
 func (m model) filteredFiles() []File {
 	if m.status.PR == nil {
@@ -224,10 +244,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prog.Width = w
 	case sentMsg:
 		wasUpdating := m.updating
-		m.sent = sanitizeTerminalText(string(msg))
+		m.sent = sanitizeTerminalText(msg.text)
+		m.sentFailed = msg.failed
 		m.updating = false
 		if wasUpdating { // after update-branch, refresh state (behind→clean, new checks)
-			return m, fetchCmd(m.cwd, m.viewNum)
+			return m, m.refreshStatus()
 		}
 		return m, nil
 	case tea.KeyMsg:
@@ -252,14 +273,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if action == "update" {
 					m.updating = true
 					m.sent = ""
+					m.sentFailed = false
 					return m, m.updateBranch(number)
 				}
 				if action == "workflow" {
 					return m, func() tea.Msg {
 						if err := runWorkflow(m.cwd, number, ref); err != nil {
-							return sentMsg("trigger failed: " + sanitizeTerminalText(title))
+							return failureMsg("trigger " + sanitizeTerminalText(title) + " failed: " + sanitizeTerminalText(err.Error()))
 						}
-						return sentMsg("triggered " + sanitizeTerminalText(title) + " on " + sanitizeTerminalText(ref))
+						return successMsg("triggered " + sanitizeTerminalText(title) + " on " + sanitizeTerminalText(ref))
 					}
 				}
 			}
@@ -280,8 +302,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "x", "d":
 				if m.ncur < len(m.notes) {
 					m.notes = append(m.notes[:m.ncur], m.notes[m.ncur+1:]...)
-					if err := writeNotes(m.status.Branch, m.notes); err != nil {
+					if err := writeNotes(m.cwd, m.status, m.notes); err != nil {
 						m.sent = "notes write refused: " + sanitizeTerminalText(err.Error())
+						m.sentFailed = true
 					}
 					if m.ncur >= len(m.notes) && m.ncur > 0 {
 						m.ncur--
@@ -353,7 +376,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.prPick = false
 					m.loaded = false
 					m.cursor = 0
-					return m, fetchCmd(m.cwd, m.viewNum)
+					return m, m.refreshStatus()
 				}
 			case "r": // submit a review: approve / comment / request-changes + body
 				if m.ppick < len(m.prList) && validPRNumber(m.prList[m.ppick].Number) {
@@ -376,7 +399,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.viewNum = 0
 				m.loaded = false
 				m.cursor = 0
-				return m, fetchCmd(m.cwd, 0)
+				return m, m.refreshStatus()
 			case "ctrl+c":
 				return m, tea.Quit
 			case "p":
@@ -482,7 +505,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				env = append(env, "CI_CWD="+m.cwd)
 				c := commandWithEnv(m.self, env, "--merge")
 				c.Env = env
-				return m, tea.ExecProcess(c, func(error) tea.Msg { return reloadMsg{} })
+				return m, tea.ExecProcess(c, func(err error) tea.Msg { return execProcessResult("merge", err) })
 			}
 		case "o": // open the PR on the web
 			if m.status.PR != nil {
@@ -512,7 +535,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.folds[3] = !m.folds[3]
 		case "a": // notes manager: review / edit / delete annotations
 			if m.status.PR != nil {
-				m.notes = loadNotes(m.status.Branch)
+				m.notes = loadNotes(m.cwd, m.status)
 				m.ncur = 0
 				m.notesMode = true
 				m.recap = m.recapFor()
@@ -590,7 +613,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 	case reloadMsg:
-		return m, fetchCmd(m.cwd, m.viewNum) // async; keeps the pane responsive after nvim/merge exits
+		return m, m.refreshStatus() // async; keeps the pane responsive after nvim/merge exits
 	case prListMsg:
 		m.prList = msg
 		if len(m.prList) > 0 {
@@ -608,7 +631,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case fetchMsg:
-		m.status = Status(msg)
+		if msg.generation != m.fetchGeneration || msg.number != m.viewNum {
+			return m, nil
+		}
+		m.status = msg.status
 		m.loaded = true
 		if m.cursor >= len(m.filteredFiles()) {
 			m.cursor = 0
@@ -623,7 +649,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.prog.SetPercent(float64(sm.Pass)/float64(len(m.status.PR.Checks)))) // animated fill
 		}
 		if !settled(m.status) {
-			cmds = append(cmds, refetchCmd(m.cwd, m.viewNum))
+			cmds = append(cmds, refetchCmd(m.cwd, m.viewNum, m.fetchGeneration))
 			// gh run list is ~2.4s; only refresh run badges when you're actually watching the
 			// workflows section on your own PR (not while reviewing another PR or with it folded).
 			if m.viewNum == 0 && len(m.workflows) > 0 && !m.folds[3] {
@@ -649,7 +675,7 @@ func (m model) pickerView() string {
 		w = 76
 	}
 	L := []string{"", "  " + sect.Render("REVIEW TO SEND"), ""}
-	notes := readNotes(notesFileFor(m.status.Branch))
+	notes := readNotes(notesFileFor(m.cwd, m.status))
 	if strings.TrimSpace(notes) == "" {
 		L = append(L, "  "+dim.Render("(no annotations — esc, then ⏎/ga to add)"))
 	} else {
@@ -1077,7 +1103,11 @@ func (m model) View() string {
 	if m.updating {
 		add(yellow.Render(frame + " updating branch with base…"))
 	} else if m.sent != "" {
-		add(green.Render("✓ " + m.sent))
+		if m.sentFailed {
+			add(red.Render("✗ " + m.sent))
+		} else {
+			add(green.Render("✓ " + m.sent))
+		}
 	}
 
 	return "\n" + strings.Join(L, "\n")

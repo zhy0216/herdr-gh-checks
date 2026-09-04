@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"unicode"
@@ -649,7 +650,13 @@ func pathWithin(root, candidate string) bool {
 		return false
 	}
 	rel, err := filepath.Rel(root, candidate)
-	if err != nil || rel == "." {
+	if err != nil {
+		// Different Windows volumes cannot contain one another. Treat an
+		// unrepresentable relative path as outside rather than dropping every
+		// trusted tool from PATH for a cross-volume checkout.
+		return false
+	}
+	if rel == "." {
 		return true
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)
@@ -673,8 +680,12 @@ func unsafeInheritedEnvKey(key string) bool {
 	return runtime.GOOS == "windows" && upper == "PATHEXT"
 }
 
-func notesNameForBranch(branch string) string {
-	sum := sha256.Sum256([]byte(branch))
+func notesNameForReview(cwd, branch string, number int) string {
+	repoIdentity := resolvedAbsPath(cwd)
+	if runtime.GOOS == "windows" {
+		repoIdentity = strings.ToLower(repoIdentity)
+	}
+	sum := sha256.Sum256([]byte(repoIdentity + "\x00" + branch + "\x00" + strconv.Itoa(number)))
 	return fmt.Sprintf("review-%x.md", sum)
 }
 

@@ -71,14 +71,6 @@ func runWithEnv(cwd, name string, processEnv []string, args ...string) (string, 
 	return strings.TrimSpace(string(out)), true
 }
 
-// githubRemoteAllowed prevents gh from using credentials against an arbitrary
-// host selected by a repository's remote configuration. The plugin targets
-// github.com; enterprise hosts, URL rewrites, and malformed URLs fail closed.
-func githubRemoteAllowed(cwd string) bool {
-	_, ok := githubRepoForCwd(cwd)
-	return ok
-}
-
 func githubRepoForCwd(cwd string) (string, bool) {
 	rewritten, ok := localGitURLRewrites(cwd)
 	if !ok || rewritten {
@@ -250,11 +242,15 @@ func ciSummary(checks []Check) Summary {
 	s := Summary{}
 	for _, c := range checks {
 		switch c.Bucket {
-		case "pass":
+		case "pass", "skipping":
 			s.Pass++
-		case "fail":
+		case "fail", "cancel":
 			s.Fail++
 		case "pending":
+			s.Pending++
+		default:
+			// GitHub may add new buckets. Never turn an unknown check state
+			// into a green result; keep watching until it is understood.
 			s.Pending++
 		}
 	}
@@ -351,14 +347,22 @@ func stateDir() string {
 	return filepath.Join(os.TempDir(), "herdr-gh-checks")
 }
 
-// one persistent review file per worktree branch
-func notesFileFor(branch string) string {
-	return filepath.Join(stateDir(), notesNameForBranch(branch))
+// One persistent review file per checkout and PR. Repository and PR identity
+// prevent notes from a same-named branch in another checkout being sent by
+// mistake, while the private state directory keeps the path itself opaque.
+func notesFileFor(cwd string, s Status) string {
+	number := 0
+	if s.PR != nil {
+		number = s.PR.Number
+	}
+	return filepath.Join(stateDir(), notesNameForReview(cwd, s.Branch, number))
 }
 
 func seedNotes(path string, s Status) error {
 	if _, err := readPrivateFile(path); err == nil {
 		return nil
+	} else if !os.IsNotExist(err) {
+		return err
 	}
 	var b strings.Builder
 	num := 0
@@ -376,15 +380,18 @@ func seedNotes(path string, s Status) error {
 	// O_EXCL prevents an existing link or note file from being overwritten.
 	err := createPrivateFile(path, []byte(b.String()))
 	if os.IsExist(err) {
-		return nil
+		// Another process may have won the O_EXCL race. Accept only a file
+		// that passes the same private-file validation as an existing note.
+		_, readErr := readPrivateFile(path)
+		return readErr
 	}
 	return err
 }
 
 // loadNotes returns the annotation lines (no # guide/blank lines).
-func loadNotes(branch string) []string {
+func loadNotes(cwd string, s Status) []string {
 	var out []string
-	for _, ln := range strings.Split(readNotes(notesFileFor(branch)), "\n") {
+	for ln := range strings.SplitSeq(readNotes(notesFileFor(cwd, s)), "\n") {
 		if strings.TrimSpace(ln) != "" {
 			out = append(out, ln)
 		}
@@ -392,8 +399,8 @@ func loadNotes(branch string) []string {
 	return out
 }
 
-func writeNotes(branch string, lines []string) error {
-	return writePrivateFile(notesFileFor(branch), []byte(strings.Join(lines, "\n")+"\n"))
+func writeNotes(cwd string, s Status, lines []string) error {
+	return writePrivateFile(notesFileFor(cwd, s), []byte(strings.Join(lines, "\n")+"\n"))
 }
 
 func readNotes(path string) string {
@@ -402,7 +409,7 @@ func readNotes(path string) string {
 		return ""
 	}
 	var out []string
-	for _, ln := range strings.Split(string(data), "\n") {
+	for ln := range strings.SplitSeq(string(data), "\n") {
 		if strings.HasPrefix(strings.TrimSpace(ln), "#") {
 			continue
 		}
@@ -503,7 +510,7 @@ func listBranches(cwd string) []string {
 		return nil
 	}
 	var b []string
-	for _, ln := range strings.Split(out, "\n") {
+	for ln := range strings.SplitSeq(out, "\n") {
 		ln = strings.TrimPrefix(strings.TrimSpace(ln), "origin/")
 		if ln == "" || ln == "HEAD" || !safeGitRef(ln) {
 			continue
@@ -519,9 +526,14 @@ func listBranches(cwd string) []string {
 func herdrBin() string { return env("HERDR_BIN_PATH", "herdr") }
 func pluginID() string { return env("HERDR_PLUGIN_ID", "herdr-gh-checks") }
 func ciCwd() string {
+	cwd := ""
 	if c := os.Getenv("CI_CWD"); c != "" {
-		return c
+		cwd = c
+	} else {
+		cwd, _ = os.Getwd()
 	}
-	wd, _ := os.Getwd()
-	return wd
+	if root, ok := runGit(cwd, "rev-parse", "--show-toplevel"); ok {
+		return root
+	}
+	return cwd
 }

@@ -5,6 +5,7 @@ package main
 // over state and the process-spawning surface lives in one place.
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -14,14 +15,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-func fetchCmd(cwd string, num int) tea.Cmd {
-	return func() tea.Msg { return fetchMsg(prStatusNum(cwd, num)) }
+func fetchCmd(cwd string, num int, generation uint64) tea.Cmd {
+	return func() tea.Msg {
+		return fetchMsg{status: prStatusNum(cwd, num), number: num, generation: generation}
+	}
 }
 func workflowsCmd(cwd string) tea.Cmd {
 	return func() tea.Msg { return workflowsMsg(listWorkflows(cwd)) }
 }
-func refetchCmd(cwd string, num int) tea.Cmd {
-	return tea.Tick(5*time.Second, func(time.Time) tea.Msg { return fetchMsg(prStatusNum(cwd, num)) })
+func refetchCmd(cwd string, num int, generation uint64) tea.Cmd {
+	return tea.Tick(5*time.Second, func(time.Time) tea.Msg {
+		return fetchMsg{status: prStatusNum(cwd, num), number: num, generation: generation}
+	})
 }
 
 func runsCmd(cwd string) tea.Cmd   { return func() tea.Msg { return runsMsg(listRuns(cwd)) } }
@@ -32,21 +37,21 @@ func (m model) approvePR(number int) tea.Cmd {
 	cwd := m.cwd
 	return func() tea.Msg {
 		if !validPRNumber(number) {
-			return sentMsg("invalid pull request number")
+			return failureMsg("invalid pull request number")
 		}
 		if st := prStatusNum(cwd, number); st.PR == nil || st.PR.State != "OPEN" || st.PR.Number != number {
-			return sentMsg(fmt.Sprintf("PR #%d is no longer open; approve cancelled", number))
+			return failureMsg(fmt.Sprintf("PR #%d is no longer open; approve cancelled", number))
 		}
 		// #nosec G204 -- the PR number is an integer and no shell is invoked.
 		c, ok := ghCommand(cwd, "pr", "review", strconv.Itoa(number), "--approve")
 		if !ok {
-			return sentMsg("approve cancelled: repository remote is not GitHub")
+			return failureMsg("approve cancelled: repository remote is not GitHub")
 		}
 		c.Dir = cwd
 		if out, err := limitedCombinedOutput(c); err != nil {
-			return sentMsg(fmt.Sprintf("PR #%d approve failed: %s", number, sanitizeTerminalText(strings.TrimSpace(string(out)))))
+			return failureMsg(fmt.Sprintf("PR #%d approve failed: %s", number, sanitizeTerminalText(strings.TrimSpace(string(out)))))
 		}
-		return sentMsg(fmt.Sprintf("approved PR #%d", number))
+		return successMsg(fmt.Sprintf("approved PR #%d", number))
 	}
 }
 
@@ -66,13 +71,20 @@ func prRefCleanup(num int) string {
 	if num == 0 {
 		return ""
 	}
-	return `; cleanup_review_ref`
+	return `; rc=$?; cleanup_review_ref; exit "$rc"`
+}
+
+func execProcessResult(action string, err error) tea.Msg {
+	if err != nil {
+		return failureMsg(action + " failed: " + sanitizeTerminalText(err.Error()))
+	}
+	return reloadMsg{}
 }
 
 // diffAll opens the whole PR side-by-side (base...head) in nvimdiff. num==0 = current branch.
 func (m model) diffAll(num int) tea.Cmd {
 	if num < 0 || (num > 0 && !validPRNumber(num)) {
-		return func() tea.Msg { return sentMsg("invalid pull request number") }
+		return func() tea.Msg { return failureMsg("invalid pull request number") }
 	}
 	// --extcmd bypasses Git's built-in nvimdiff helper, whose historical command
 	// line did not put `--` before filenames. Git supplies LOCAL/REMOTE as quoted
@@ -81,7 +93,7 @@ func (m model) diffAll(num int) tea.Cmd {
 	if num > 0 {
 		ref, err := newReviewRef()
 		if err != nil {
-			return func() tea.Msg { return sentMsg("could not allocate temporary review ref") }
+			return func() tea.Msg { return failureMsg("could not allocate temporary review ref") }
 		}
 		env = append(env, "REVIEW_REF="+ref)
 	}
@@ -91,52 +103,69 @@ func (m model) diffAll(num int) tea.Cmd {
 	c := commandWithEnv("sh", env, "-c", script)
 	c.Dir = m.cwd
 	c.Env = append(env, "NUM="+strconv.Itoa(num))
-	return tea.ExecProcess(c, func(error) tea.Msg { return reloadMsg{} })
+	return tea.ExecProcess(c, func(err error) tea.Msg { return execProcessResult("diff", err) })
 }
 
-// annotateFile reviews ONE file side-by-side with `ga` line annotation. num==0 diffs base vs the
-// REAL working file (checked out) so review.vim reads the real path; num>0 diffs base vs a temp of
-// the PR head and passes the path via CI_REVIEW_PATH.
+// annotateFile reviews one file side-by-side with `ga` line annotation. A
+// missing blob is materialized as an empty, private temporary file so added,
+// deleted, and renamed paths remain reviewable. CI_REVIEW_PATH always carries
+// the real repository path, even when Neovim is displaying two snapshots.
 func (m model) annotateFile(path string, num int) tea.Cmd {
-	if num < 0 || (num > 0 && !validPRNumber(num)) || (num == 0 && func() bool { _, err := validateRepoPath(m.cwd, path, true); return err != nil }()) || (num > 0 && func() bool { _, err := validateRepoPath(m.cwd, path, false); return err != nil }()) {
-		return func() tea.Msg { return sentMsg("refused unsafe or unavailable file path") }
+	if num < 0 || (num > 0 && !validPRNumber(num)) {
+		return func() tea.Msg { return failureMsg("invalid pull request number") }
 	}
-	notes := notesFileFor(m.status.Branch)
+	if _, err := validateRepoPath(m.cwd, path, false); err != nil {
+		return func() tea.Msg { return failureMsg("refused unsafe file path") }
+	}
+	useWorktree := false
+	if num == 0 {
+		if _, err := validateRepoPath(m.cwd, path, true); err == nil {
+			useWorktree = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return func() tea.Msg { return failureMsg("refused unsafe or unavailable file path") }
+		}
+	}
+	notes := notesFileFor(m.cwd, m.status)
 	if err := seedNotes(notes, m.status); err != nil {
-		return func() tea.Msg { return sentMsg("notes unavailable: " + sanitizeTerminalText(err.Error())) }
+		return func() tea.Msg { return failureMsg("notes unavailable: " + sanitizeTerminalText(err.Error())) }
 	}
 	vimrc := reviewVimPath()
 	if vimrc == "" {
-		return func() tea.Msg { return sentMsg("review script unavailable") }
+		return func() tea.Msg { return failureMsg("review script unavailable") }
 	}
-	env := append(secureShellEnvForDir(m.cwd), "CI_NOTES="+notes, "NUM="+strconv.Itoa(num), "FILE="+path, "VIMRC="+vimrc)
+	env := append(secureShellEnvForDir(m.cwd), "CI_NOTES="+notes, "CI_REVIEW_PATH="+path, "NUM="+strconv.Itoa(num), "FILE="+path, "VIMRC="+vimrc)
+	if useWorktree {
+		env = append(env, "USE_WORKTREE=1")
+	}
 	if num > 0 {
 		ref, err := newReviewRef()
 		if err != nil {
-			return func() tea.Msg { return sentMsg("could not allocate temporary review ref") }
+			return func() tea.Msg { return failureMsg("could not allocate temporary review ref") }
 		}
 		env = append(env, "REVIEW_REF="+ref)
 	}
-	var body string
-	if num == 0 {
-		body = `a=$(mktemp); trap 'rm -f "$a"' EXIT; git_safe show "origin/$base:$FILE" > "$a" 2>/dev/null || exit 1; nvim -u NONE --noplugin -d -c 'set nomodeline noexrc' -c 'wincmd l' -S "$VIMRC" -- "$a" "$FILE"`
-	} else {
-		env = append(env, "CI_REVIEW_PATH="+path)
-		body = `a=$(mktemp); b=$(mktemp); trap 'rm -f "$a" "$b"; cleanup_review_ref' EXIT; git_safe show "origin/$base:$FILE" > "$a" 2>/dev/null || exit 1; git_safe show "$head:$FILE" > "$b" 2>/dev/null || exit 1; nvim -u NONE --noplugin -d -c 'set nomodeline noexrc' -c 'wincmd l' -S "$VIMRC" -- "$a" "$b"`
-	}
+	body := annotationShellBody(num)
 	script := prRefShell(num) + "; " + body + prRefCleanup(num)
 	// #nosec G204 -- path is canonicalized/validated above and every shell
 	// expansion is double-quoted; nvim receives `--` before file arguments.
 	c := commandWithEnv("sh", env, "-c", script)
 	c.Dir = m.cwd
 	c.Env = env
-	return tea.ExecProcess(c, func(error) tea.Msg { return reloadMsg{} })
+	return tea.ExecProcess(c, func(err error) tea.Msg { return execProcessResult("file review", err) })
+}
+
+func annotationShellBody(num int) string {
+	cleanup := `trap 'rm -f "$a" "$b"' EXIT`
+	if num > 0 {
+		cleanup = `trap 'rm -f "$a" "$b"; cleanup_review_ref' EXIT`
+	}
+	return `materialize_blob() { blob_rev=$1; blob_out=$2; : > "$blob_out" || return 1; git_safe cat-file -e "$blob_rev^{commit}" 2>/dev/null || return 1; if git_safe cat-file -e "$blob_rev:$FILE" 2>/dev/null; then git_safe show "$blob_rev:$FILE" > "$blob_out" 2>/dev/null || return 1; fi; return 0; }; a=$(mktemp) || exit 1; b=$(mktemp) || { rm -f "$a"; exit 1; }; ` + cleanup + `; materialize_blob "origin/$base" "$a" || exit 1; if [ "${USE_WORKTREE:-}" = 1 ]; then nvim -u NONE --noplugin -d -c 'set nomodeline noexrc' -c 'wincmd l' -S "$VIMRC" -- "$a" "$FILE"; else materialize_blob "$head" "$b" || exit 1; nvim -u NONE --noplugin -d -c 'set nomodeline noexrc' -c 'wincmd l' -S "$VIMRC" -- "$a" "$b"; fi`
 }
 
 // ghInteractive hands the terminal to gh's own review/comment flow (prompts + $EDITOR body).
 func (m model) ghInteractive(kind string, number int) tea.Cmd {
 	if !validPRNumber(number) {
-		return func() tea.Msg { return sentMsg("invalid pull request number") }
+		return func() tea.Msg { return failureMsg("invalid pull request number") }
 	}
 	sub := "review"
 	switch kind {
@@ -144,54 +173,55 @@ func (m model) ghInteractive(kind string, number int) tea.Cmd {
 	case "comment":
 		sub = "comment"
 	default:
-		return func() tea.Msg { return sentMsg("invalid review action") }
+		return func() tea.Msg { return failureMsg("invalid review action") }
 	}
 	// #nosec G204 -- sub is an internal review/comment allowlist and number is an integer.
 	c, ok := ghCommand(m.cwd, "pr", sub, strconv.Itoa(number))
 	if !ok {
-		return func() tea.Msg { return sentMsg("review cancelled: repository remote is not GitHub") }
+		return func() tea.Msg { return failureMsg("review cancelled: repository remote is not GitHub") }
 	}
 	c.Dir = m.cwd
-	return tea.ExecProcess(c, func(error) tea.Msg { return reloadMsg{} })
+	return tea.ExecProcess(c, func(err error) tea.Msg { return execProcessResult(sub, err) })
 }
 
 // openNotes edits the worktree's review file in nvim.
 func (m model) openNotes() tea.Cmd {
-	path := notesFileFor(m.status.Branch)
+	path := notesFileFor(m.cwd, m.status)
 	if err := seedNotes(path, m.status); err != nil {
-		return func() tea.Msg { return sentMsg("notes unavailable: " + sanitizeTerminalText(err.Error())) }
+		return func() tea.Msg { return failureMsg("notes unavailable: " + sanitizeTerminalText(err.Error())) }
 	}
 	// #nosec G204 -- notes path is generated inside the private state directory
 	// and `--` prevents it from being parsed as an nvim option.
 	c := commandWithEnv("nvim", secureShellEnvForDir(m.cwd), "-u", "NONE", "--noplugin", "-c", "set nomodeline noexrc", "--", path)
 	c.Dir = m.cwd
-	return tea.ExecProcess(c, func(error) tea.Msg { return reloadMsg{} })
+	return tea.ExecProcess(c, func(err error) tea.Msg { return execProcessResult("notes editor", err) })
 }
 
 // sendReview posts the annotations (minus # guide lines) to the chosen agent pane.
 func (m model) sendReview(target string) tea.Cmd {
-	branch, num := m.status.Branch, 0
-	if m.status.PR != nil {
-		num = m.status.PR.Number
+	cwd, status := m.cwd, m.status
+	branch, num := status.Branch, 0
+	if status.PR != nil {
+		num = status.PR.Number
 	}
 	return func() tea.Msg {
-		body := readNotes(notesFileFor(branch))
+		body := readNotes(notesFileFor(cwd, status))
 		if body == "" {
-			return sentMsg("no annotations — press a to write some")
+			return failureMsg("no annotations — press a to write some")
 		}
 		text := fmt.Sprintf("Code review for PR #%d (%s):\n\n%s", num, sanitizeTerminalText(branch), sanitizeTerminalText(body))
 		if strings.TrimSpace(target) == "" {
-			return sentMsg("send failed: no target pane")
+			return failureMsg("send failed: no target pane")
 		}
 		if !safeIdentifier(target) {
-			return sentMsg("send failed: invalid target pane")
+			return failureMsg("send failed: invalid target pane")
 		}
 		// #nosec G204 -- target is selected from same-workspace agent metadata,
 		// and exec.Command does not invoke a shell.
-		if err := commandWithEnv(herdrBin(), secureShellEnvForDir(m.cwd), "agent", "prompt", target, text).Run(); err != nil {
-			return sentMsg("send failed")
+		if err := commandWithEnv(herdrBin(), secureShellEnvForDir(cwd), "agent", "prompt", target, text).Run(); err != nil {
+			return failureMsg("send failed: " + sanitizeTerminalText(err.Error()))
 		}
-		return sentMsg("sent to " + target)
+		return successMsg("sent to " + target)
 	}
 }
 
@@ -200,31 +230,31 @@ func (m model) updateBranch(expectedNumber int) tea.Cmd {
 	cwd := m.cwd
 	return func() tea.Msg {
 		if !validPRNumber(expectedNumber) {
-			return sentMsg("update cancelled: invalid pull request number")
+			return failureMsg("update cancelled: invalid pull request number")
 		}
 		if st := prStatus(cwd); st.PR == nil || st.PR.State != "OPEN" || st.PR.Number != expectedNumber {
-			return sentMsg("update cancelled: no open pull request")
+			return failureMsg("update cancelled: no open pull request")
 		}
 		c, ok := ghCommand(cwd, "pr", "update-branch")
 		if !ok {
-			return sentMsg("update cancelled: repository remote is not GitHub")
+			return failureMsg("update cancelled: repository remote is not GitHub")
 		}
 		c.Dir = cwd
 		if out, err := limitedCombinedOutput(c); err != nil {
-			return sentMsg("update failed: " + sanitizeTerminalText(strings.TrimSpace(string(out))))
+			return failureMsg("update failed: " + sanitizeTerminalText(strings.TrimSpace(string(out))))
 		}
-		return sentMsg("branch updated with base")
+		return successMsg("branch updated with base")
 	}
 }
 
 // watchRun streams the workflow's latest run (gh run watch) until it completes.
 func (m model) watchRun(id int) tea.Cmd {
 	if id <= 0 {
-		return func() tea.Msg { return sentMsg("invalid workflow id") }
+		return func() tea.Msg { return failureMsg("invalid workflow id") }
 	}
 	repo, ok := githubRepoForCwd(m.cwd)
 	if !ok {
-		return func() tea.Msg { return sentMsg("watch cancelled: repository remote is not GitHub") }
+		return func() tea.Msg { return failureMsg("watch cancelled: repository remote is not GitHub") }
 	}
 	script := `rid=$(gh run list --workflow="$1" --repo "$2" -L1 --json databaseId -q '.[0].databaseId' 2>/dev/null); if printf '%s' "$rid" | grep -Eq '^[0-9]+$'; then gh run watch "$rid" --repo "$2"; else echo "no valid run found — trigger one first (⏎)"; sleep 1; fi`
 	// #nosec G204 -- the script is constant and the only positional value is a
@@ -236,10 +266,10 @@ func (m model) watchRun(id int) tea.Cmd {
 	out := newTerminalSanitizer(os.Stdout)
 	errOut := newTerminalSanitizer(os.Stderr)
 	c.Stdout, c.Stderr = out, errOut
-	return tea.ExecProcess(c, func(error) tea.Msg {
+	return tea.ExecProcess(c, func(err error) tea.Msg {
 		_ = out.Flush()
 		_ = errOut.Flush()
-		return reloadMsg{}
+		return execProcessResult("workflow watch", err)
 	})
 }
 

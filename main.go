@@ -1,9 +1,10 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -119,23 +120,61 @@ func ctxCwd() string {
 
 // ---------- merge ----------
 // gh's interactive flow picks squash/merge/rebase and shows the editable default commit message.
-func readKey() string {
-	cmd := commandWithEnv("sh", secureShellEnv(), "-c", `read -rsn1 k; printf %s "$k"`)
-	cmd.Stdin, cmd.Stderr = os.Stdin, os.Stderr
-	out, _ := cmd.Output()
-	return string(out)
+type mergeChoice uint8
+
+const (
+	mergeChoiceInvalid mergeChoice = iota
+	mergeChoiceMerge
+	mergeChoiceAdmin
+	mergeChoiceCancel
+	mergeChoiceEOF
+)
+
+var errInputTooLong = errors.New("input line too long")
+
+// readLine reads exactly through the next newline without buffering past it.
+// That matters because gh inherits the same stdin for its interactive merge
+// flow; a buffered reader could consume input intended for gh.
+func readLine(r io.Reader) (string, error) {
+	const maxInputBytes = 4096
+	var line strings.Builder
+	var one [1]byte
+	for {
+		if _, err := io.ReadFull(r, one[:]); err != nil {
+			return "", err
+		}
+		if one[0] == '\n' {
+			return strings.TrimSuffix(line.String(), "\r"), nil
+		}
+		if line.Len() >= maxInputBytes {
+			return "", errInputTooLong
+		}
+		line.WriteByte(one[0])
+	}
 }
 
-func readLine() string {
-	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
-	line = strings.TrimSuffix(line, "\n")
-	line = strings.TrimSuffix(line, "\r")
-	return line
+func readMergeChoice(r io.Reader) (mergeChoice, error) {
+	line, err := readLine(r)
+	if errors.Is(err, io.EOF) {
+		return mergeChoiceEOF, nil
+	}
+	if err != nil {
+		return mergeChoiceInvalid, err
+	}
+	switch line {
+	case "":
+		return mergeChoiceMerge, nil
+	case "a", "A":
+		return mergeChoiceAdmin, nil
+	case "q", "Q", "\x1b":
+		return mergeChoiceCancel, nil
+	default:
+		return mergeChoiceInvalid, nil
+	}
 }
-func anyKey() {
-	cmd := commandWithEnv("sh", secureShellEnv(), "-c", "read -rsn1")
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	_ = cmd.Run()
+
+func waitForEnter(r io.Reader) {
+	_, _ = readLine(r)
 }
 
 func mergeFlow() {
@@ -143,9 +182,9 @@ func mergeFlow() {
 	st := prStatus(cwd)
 	fmt.Print("\x1b[2J\x1b[H\x1b[?25l")
 	if st.PR == nil {
-		fmt.Print("\n\n  " + dim.Render("no open PR for this branch") + "\n\n  press any key\n")
+		fmt.Print("\n\n  " + dim.Render("no open PR for this branch") + "\n\n  press enter\n")
 		fmt.Print("\x1b[?25h")
-		anyKey()
+		waitForEnter(os.Stdin)
 		return
 	}
 	p := st.PR
@@ -158,25 +197,33 @@ func mergeFlow() {
 	}
 	fmt.Println()
 	fmt.Println("  " + cyan.Render("[enter]") + " merge         " + dim.Render("choose squash/merge/rebase + edit message next"))
-	fmt.Println("  " + yellow.Render("[a]") + " admin bypass   " + dim.Render("skip required checks / branch protection"))
-	fmt.Println("  " + dim.Render("[q] cancel"))
+	fmt.Println("  " + yellow.Render("[a + enter]") + " admin bypass   " + dim.Render("skip required checks / branch protection"))
+	fmt.Println("  " + dim.Render("[q + enter] cancel"))
 	fmt.Print("\n  " + mauve.Render("\u203a") + " ")
 
-	k := readKey()
+	choice, inputErr := readMergeChoice(os.Stdin)
 	fmt.Print("\x1b[?25h")
-	if k == "q" || k == "\x1b" || k == "\x03" {
-		fmt.Print("\n\n  cancelled\n")
+	if inputErr != nil {
+		fmt.Print("\n\n  cancelled (input error)\n")
 		return
 	}
-	if k != "a" && k != "A" && k != "\r" && k != "\n" {
-		fmt.Print("\n\n  cancelled (press enter to merge, or a for admin)\n")
+	switch choice {
+	case mergeChoiceCancel:
+		fmt.Print("\n\n  cancelled\n")
+		return
+	case mergeChoiceEOF:
+		fmt.Print("\n\n  cancelled (input closed)\n")
+		return
+	case mergeChoiceInvalid:
+		fmt.Print("\n\n  cancelled (press enter to merge, or type a then enter for admin)\n")
 		return
 	}
 	flags := []string{"pr", "merge"}
-	if k == "a" || k == "A" {
+	if choice == mergeChoiceAdmin {
 		fmt.Print("\n  " + yellow.Render("Admin bypass skips required checks and branch protection."))
 		fmt.Print("\n  Type " + bold.Render("ADMIN") + " to continue, or anything else to cancel: ")
-		if readLine() != "ADMIN" {
+		line, err := readLine(os.Stdin)
+		if err != nil || line != "ADMIN" {
 			fmt.Print("\n\n  cancelled\n")
 			return
 		}
@@ -191,8 +238,8 @@ func mergeFlow() {
 	fmt.Print("\x1b[2J\x1b[H")
 	cmd, ok := ghCommand(cwd, flags...)
 	if !ok {
-		fmt.Print("\n " + red.Render("repository remote is not a supported GitHub URL") + " — press any key\n")
-		anyKey()
+		fmt.Print("\n " + red.Render("repository remote is not a supported GitHub URL") + " — press enter\n")
+		waitForEnter(os.Stdin)
 		return
 	}
 	cmd.Dir = cwd
@@ -209,11 +256,11 @@ func mergeFlow() {
 		if err != nil {
 			msg += "  " + dim.Render("(worktree: local branch left in place)")
 		}
-		fmt.Print("\n " + msg + " \u2014 press any key\n")
+		fmt.Print("\n " + msg + " \u2014 press enter\n")
 	} else {
-		fmt.Print("\n " + red.Render("\u2717 not merged / cancelled") + " \u2014 press any key\n")
+		fmt.Print("\n " + red.Render("\u2717 not merged / cancelled") + " \u2014 press enter\n")
 	}
-	anyKey()
+	waitForEnter(os.Stdin)
 }
 
 // ---------- sidebar ----------

@@ -85,6 +85,10 @@ tester for every manual run.
    closed, and merged states.
 5. Resize the pane, filter files with `/`, navigate with arrows and `j`/`k`, and
    toggle all four fold sections.
+6. Click the shortcut on the first row: `#<number>` opens the displayed PR,
+   including when viewing another PR; without a PR, the branch name opens that
+   branch on GitHub. Confirm that `o` does the same, the shortcut stays at the
+   top in a short pane, and clicks in modal dialogs do not open a browser.
 
 ### Review and annotation
 

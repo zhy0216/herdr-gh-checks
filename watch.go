@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func trunc(s string, n int) string {
@@ -77,6 +78,7 @@ type model struct {
 	folds               [4]bool // collapse Description / Checks / Files / Workflows
 	wfLoaded            bool    // workflows fetched once
 	width               int
+	height              int
 	sp                  spinner.Model // bubbles/spinner drives all spinner frames
 	prog                progress.Model
 	ti                  textinput.Model // file filter input
@@ -235,6 +237,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
+		m.height = msg.Height
 		w := msg.Width - 40 // leave room for the headline text on the same line
 		if w > 28 {
 			w = 28
@@ -243,6 +246,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			w = 12
 		}
 		m.prog.Width = w
+	case tea.MouseMsg:
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft &&
+			!msg.Alt && !msg.Ctrl && !msg.Shift && msg.Y == 0 && msg.X >= 2 &&
+			msg.X < 2+ansi.StringWidth(m.webShortcutLabel()) {
+			return m, m.openCurrentWeb()
+		}
+	case webOpenFailedMsg:
+		m.sent = sanitizeTerminalText(string(msg))
+		m.sentFailed = true
 	case sentMsg:
 		wasUpdating := m.updating
 		m.sent = sanitizeTerminalText(msg.text)
@@ -356,13 +368,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "o":
 				if m.ppick < len(m.prList) && validPRNumber(m.prList[m.ppick].Number) {
-					// #nosec G204 -- PR number is an integer; no shell is involved.
-					c, ok := ghCommand(m.cwd, "pr", "view", strconv.Itoa(m.prList[m.ppick].Number), "--web")
-					if !ok {
-						break
-					}
-					c.Dir = m.cwd
-					_ = c.Start()
+					return m, openWebCmd(m.cwd, m.prList[m.ppick].Number, "")
 				}
 			case "a": // approve after an explicit confirmation
 				if m.ppick < len(m.prList) && validPRNumber(m.prList[m.ppick].Number) {
@@ -419,13 +425,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.annotateFile(ff[m.cursor].Path, m.viewNum)
 				}
 			case "o":
-				// #nosec G204 -- PR number is an integer; no shell is involved.
-				c, ok := ghCommand(m.cwd, "pr", "view", strconv.Itoa(m.viewNum), "--web")
-				if !ok {
-					break
-				}
-				c.Dir = m.cwd
-				_ = c.Start()
+				return m, m.openCurrentWeb()
 			case "up", "k":
 				if m.cursor > 0 {
 					m.cursor--
@@ -508,15 +508,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				c.Env = env
 				return m, tea.ExecProcess(c, func(err error) tea.Msg { return execProcessResult("merge", err) })
 			}
-		case "o": // open the PR on the web
-			if m.status.PR != nil {
-				c, ok := ghCommand(m.cwd, "pr", "view", "--web")
-				if !ok {
-					break
-				}
-				c.Dir = m.cwd
-				_ = c.Start()
-			}
+		case "o": // open the displayed PR, or its branch when there is no PR
+			return m, m.openCurrentWeb()
 		case "d": // review ALL PR files in nvim, side-by-side; :qa advances
 			if m.status.PR != nil {
 				return m, m.diffAll(0)
@@ -903,7 +896,61 @@ func (m model) checkRows(checks []Check, frame string) []string {
 	return rows
 }
 
+func (m model) webShortcutAvailable() bool {
+	if !m.loaded || !m.status.Repo || m.confirmAction != "" || m.prPick || m.wfBranch || m.notesMode || m.picking {
+		return false
+	}
+	if m.status.PR != nil {
+		return validPRNumber(m.status.PR.Number) && (m.viewNum == 0 || m.viewNum == m.status.PR.Number)
+	}
+	return m.viewNum == 0 && safeGitRef(m.status.Branch)
+}
+
+func (m model) webShortcutLabel() string {
+	if !m.webShortcutAvailable() {
+		return ""
+	}
+	label := sanitizeTerminalText(m.status.Branch)
+	if m.status.PR != nil {
+		label = fmt.Sprintf("#%d", m.status.PR.Number)
+	}
+	label += " ↗"
+	if m.width > 0 {
+		label = ansi.Truncate(label, max(0, m.width-2), "…")
+	}
+	return label
+}
+
+func (m model) openCurrentWeb() tea.Cmd {
+	if !m.webShortcutAvailable() {
+		return nil
+	}
+	if m.status.PR != nil {
+		return openWebCmd(m.cwd, m.status.PR.Number, "")
+	}
+	return openWebCmd(m.cwd, 0, m.status.Branch)
+}
+
 func (m model) View() string {
+	body := m.contentView()
+	label := m.webShortcutLabel()
+	if label == "" {
+		return body
+	}
+	header := "  " + cyan.Bold(true).Underline(true).Render(label) + dim.Render("  click · o open")
+	if m.height == 1 {
+		return header
+	}
+	lines := strings.Split(body, "\n")
+	// Reserve the first row for the shortcut; Bubble Tea otherwise clips from
+	// the top when the content is taller than the pane.
+	if m.height > 1 && len(lines) >= m.height {
+		lines = lines[len(lines)-(m.height-1):]
+	}
+	return header + "\n" + strings.Join(lines, "\n")
+}
+
+func (m model) contentView() string {
 	if m.confirmAction != "" {
 		return m.confirmView()
 	}
@@ -928,7 +975,7 @@ func (m model) View() string {
 		return "\n  " + dim.Render("not a git repository")
 	}
 	if s.PR == nil {
-		L := []string{"", "  " + bold.Render(sanitizeTerminalText(s.Branch)), "", "  " + dim.Render("no open PR for this branch") + "  " + dim.Render("· p review other PRs")}
+		L := []string{"", "  " + dim.Render("no open PR for this branch") + "  " + dim.Render("· p review other PRs")}
 		L = append(L, "", "  "+ciHeadline(s.Checks, frame), "", "  "+fhdr("CHECKS", m.folds[1], "2"))
 		if !m.folds[1] {
 			for _, ln := range m.checkRows(s.Checks, frame) {
@@ -939,6 +986,13 @@ func (m model) View() string {
 			L = append(L, "")
 			for _, ln := range wc {
 				L = append(L, "  "+ln)
+			}
+		}
+		if m.sent != "" {
+			if m.sentFailed {
+				L = append(L, "", "  "+red.Render("✗ "+m.sent))
+			} else {
+				L = append(L, "", "  "+green.Render("✓ "+m.sent))
 			}
 		}
 		return strings.Join(L, "\n")
@@ -1233,6 +1287,6 @@ func descLines(body string, max, width int) []string {
 }
 
 func watchPane() {
-	p := tea.NewProgram(newModel(ciCwd()), tea.WithAltScreen())
+	p := tea.NewProgram(newModel(ciCwd()), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, _ = p.Run()
 }

@@ -5,6 +5,7 @@ package main
 // over state and the process-spawning surface lives in one place.
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"os"
@@ -31,6 +32,40 @@ func refetchCmd(cwd string, num int, generation uint64) tea.Cmd {
 
 func runsCmd(cwd string) tea.Cmd   { return func() tea.Msg { return runsMsg(listRuns(cwd)) } }
 func prListCmd(cwd string) tea.Cmd { return func() tea.Msg { return prListMsg(listPRs(cwd)) } }
+
+type webOpenFailedMsg string
+
+// openWebCmd opens the displayed target without blocking the TUI.
+func openWebCmd(cwd string, number int, branch string) tea.Cmd {
+	return func() tea.Msg {
+		var args []string
+		if validPRNumber(number) {
+			args = []string{"pr", "view", strconv.Itoa(number), "--web"}
+		} else if number == 0 && safeGitRef(branch) {
+			ref := branch
+			if ref == "HEAD" {
+				var ok bool
+				ref, ok = runGit(cwd, "rev-parse", "HEAD")
+				if !ok || !safeGitRef(ref) {
+					return webOpenFailedMsg("open failed: cannot resolve HEAD")
+				}
+			}
+			args = []string{"browse", "--branch", ref}
+		} else {
+			return webOpenFailedMsg("open failed: invalid PR or branch")
+		}
+		c, ok := ghCommand(cwd, args...)
+		if !ok {
+			return webOpenFailedMsg("open failed: repository remote is not GitHub")
+		}
+		c.Dir = cwd
+		if out, err := limitedCombinedOutput(c); err != nil {
+			detail := cmp.Or(strings.TrimSpace(string(out)), err.Error())
+			return webOpenFailedMsg("open failed: " + sanitizeTerminalText(detail))
+		}
+		return nil
+	}
+}
 
 // approvePR approves without a body (async).
 func (m model) approvePR(number int) tea.Cmd {

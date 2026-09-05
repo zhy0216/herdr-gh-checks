@@ -75,6 +75,10 @@ Then press your prefix (default `ctrl+b`) followed by `i`. Avoid `alt+` chords (
 
 ## Keys
 
+Click the shortcut at the very top of the pane to open the displayed PR (for
+example, `#1112 ↗`) in your browser. When there is no PR, it shows the branch
+name and opens that branch on GitHub. Press `o` for the same action.
+
 | Key | Action |
 | --- | --- |
 | `↑↓` · `j` `k` | Move the file cursor |
@@ -82,7 +86,7 @@ Then press your prefix (default `ctrl+b`) followed by `i`. Avoid `alt+` chords (
 | `d` | Review all files side-by-side |
 | `/` | Filter files |
 | `a` · `s` | Manage annotations · send review to an agent |
-| `u` · `m` · `o` | Confirm/update branch with base · merge · open on web |
+| `u` · `m` · `o` | Confirm/update branch with base · merge · open PR or branch on web |
 | `p` | Browse & review other PRs (`a` confirm approve · `r` review · `c` comment) |
 | `tab` `w` | Focus Workflows — `⏎` choose/confirm run · `v` watch a run |
 | `1`–`4` | Fold sections |

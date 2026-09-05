@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   build:
+    if: github.repository == 'zhy0216/herdr-gh-checks'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -140,6 +141,7 @@ jobs:
           # An existing release is an error. Never replace an asset in place:
           # doing so would invalidate the installer's reviewed digest allowlist.
           gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo zhy0216/herdr-gh-checks \
             --verify-tag \
             --fail-on-no-commits \
             --title "$GITHUB_REF_NAME" \

@@ -70,7 +70,7 @@ export GH_HOST=github.com GH_PAGER=cat PAGER=cat LESS=-FRX NO_COLOR=1 CLICOLOR=0
 cd "$root"
 
 bin=herdr-gh-checks
-repo=itisbryan/herdr-gh-checks
+repo=zhy0216/herdr-gh-checks
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' herdr-plugin.toml | head -1)
 tmp=
 build_tmp=

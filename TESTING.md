@@ -150,7 +150,7 @@ published asset is not trusted merely because its adjacent `.sha256` file exists
 ### Stage 2: review and allowlist
 
 1. Download the release into a new temporary directory with
-   `gh release download v<version> --repo itisbryan/herdr-gh-checks`.
+   `gh release download v<version> --repo zhy0216/herdr-gh-checks`.
 2. Verify the build attestation with `gh attestation verify` and independently
    calculate every binary SHA-256. Compare it with both GitHub's asset digest and
    the sidecar. Never copy a sidecar into the allowlist without this comparison.
@@ -163,7 +163,7 @@ published asset is not trusted merely because its adjacent `.sha256` file exists
 4. Commit and push the allowlist as a separate reviewed change. Do not move the
    release tag or replace its assets.
 5. On clean machines for each supported OS, run
-   `herdr plugin install itisbryan/herdr-gh-checks`. Confirm that installation
+   `herdr plugin install zhy0216/herdr-gh-checks`. Confirm that installation
    selects the allowlisted prebuilt binary, works without Go, launches the pane,
    and reports the expected behavior from the manual matrix.
 

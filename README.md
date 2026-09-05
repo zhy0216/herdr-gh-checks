@@ -32,7 +32,7 @@
 From GitHub (downloads a prebuilt binary only after its release asset has been independently verified and its digest added to the reviewed `release-checksums.txt` allowlist; otherwise builds from source):
 
 ```bash
-herdr plugin install itisbryan/herdr-gh-checks
+herdr plugin install zhy0216/herdr-gh-checks
 ```
 
 Or link a local checkout for development:
@@ -116,10 +116,10 @@ PR titles, descriptions, workflow names, check names, labels, and file paths are
 
 The plugin can change GitHub state only through the explicit actions documented above. Approve and update-branch show a confirmation screen; admin merge additionally requires typing `ADMIN`, and a final PR-state check runs immediately before merge. Sending notes is limited to agents in the current `HERDR_WORKSPACE_ID`. API and fetch operations accept only `github.com` remotes; GitHub Enterprise remotes are rejected. For the Git operations used by review, repository-defined hooks, URL rewrites, credential helpers, proxies, and custom upload-pack/SSH settings are intentionally ignored; use a normal authenticated `gh`/SSH setup rather than repository-local transport customization.
 
-Installers do not trust a release's adjacent `.sha256` file. Publishing is deliberately two-stage: the tagged workflow first creates immutable binaries and attestations, then their independently verified digests are added to `release-checksums.txt` in a separate reviewed commit. Until that second stage is complete, installation safely builds from source. When Git metadata is present, a fork or modified checkout also refuses a binary from the canonical upstream owner and builds locally. Release workflow actions are pinned to commit IDs and existing releases are never overwritten. The allowlist is integrity protection, not an independent publisher signature; review the source and release provenance before installing.
+Installers do not trust a release's adjacent `.sha256` file. Publishing is deliberately two-stage: the tagged workflow first creates immutable binaries and attestations, then their independently verified digests are added to `release-checksums.txt` in a separate reviewed commit. Until that second stage is complete, installation safely builds from source. When Git metadata is present, a fork or modified checkout also refuses a binary from the configured release repository and builds locally. Release workflow actions are pinned to commit IDs and existing releases are never overwritten. The allowlist is integrity protection, not an independent publisher signature; review the source and release provenance before installing.
 
 For vulnerability reports, see [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE) © itisbryan
+[MIT](LICENSE)

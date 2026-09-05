@@ -2,9 +2,9 @@
 
 ## 意图
 
-在发布 `herdr-gh-checks` v0.2.3 前，基于当前 fork、上游仓库、代码、测试与发布工作流的实际状态，确认项目是否缺少核心能力，修复会让既有核心流程失效或误导用户的问题，补齐持续集成和可复现的测试说明，然后通过 `gh` 把变更提交到规范上游并完成可验证的发布流程。审计结论是产品功能面已经覆盖 PR/CI 查看、逐行注释、跨 PR 审阅、workflow、update/merge 与 sidebar，不需要再增加新的大模块；但已有实现中存在 7 个 P1 正确性/安全性缺口，当前不能直接发布。
+在发布 `herdr-gh-checks` v0.2.3 前，基于 `zhy0216/herdr-gh-checks` 的代码、测试与发布工作流的实际状态，确认项目是否缺少核心能力，修复会让既有核心流程失效或误导用户的问题，补齐持续集成和可复现的测试说明，然后通过 `gh` 把变更提交到 `zhy0216/herdr-gh-checks` 并完成可验证的发布流程。审计结论是产品功能面已经覆盖 PR/CI 查看、逐行注释、跨 PR 审阅、workflow、update/merge 与 sidebar，不需要再增加新的大模块；但已有实现中存在 7 个 P1 正确性/安全性缺口，当前不能直接发布。
 
-当前工作区是 `zhy0216/herdr-gh-checks` fork，规范发行仓库、安装器和 Herdr 市场均指向 `itisbryan/herdr-gh-checks`。当前认证账号对上游只有读取权限，因此本轮默认发布路径为：修复并验证 → 推送 fork → 创建上游 PR → 上游合并后由有权限的维护者打 tag → 验证 Release → 补充受审 checksum allowlist。不会在未确认的情况下把 fork 重新品牌化为独立发行源。
+本项目唯一的 PR 和发行目标是 `zhy0216/herdr-gh-checks`，安装器和安装文档统一使用该仓库。发布路径为：修复并验证 → 推送本仓库分支 → 在本仓库创建 PR → 合并后打 tag → 验证 Release → 补充受审 checksum allowlist。所有 `gh` PR 和 Release 写操作必须显式指定 `--repo zhy0216/herdr-gh-checks`。
 
 ## 目标
 
@@ -18,15 +18,15 @@
 - 增加 PR/push CI，并在 tag 发布前执行格式、模块、测试、race、vet、跨平台构建和版本一致性检查。
 - 使用当前已修复的精确发布工具链 Go 1.27.1 构建 v0.2.3。
 - 提供仓库内 `TESTING.md`，覆盖自动化、手工验收、安全回归、安装器与发布后验收。
-- 通过 fork 分支和上游 PR 交付；权限允许时完成 v0.2.3 Release 及 checksum 二阶段收尾。
+- 通过本仓库分支和 PR 交付；完成 v0.2.3 Release 及 checksum 二阶段收尾。
 
 ## 非目标
 
-- 不把 `zhy0216` fork 擅自改造成新的规范发行源，也不改动原作者归属。
+- 不向其他仓库提交 PR 或发布；保留 LICENSE 中的原始版权声明。
 - 不在本次引入 GitHub Enterprise 支持；现有安全边界仍只允许 `github.com`。
 - 不重写 Bubble Tea UI 或改造为新的 GitHub API 客户端。
 - 不承诺未经真实 Windows 主机验证的完整原生 Windows 交互体验；本轮修复可确定的跨卷问题并保留明确测试项。
-- 不在没有上游写权限时伪造“已发布到上游”的完成状态。
+- 只有本仓库 Release 和 checksum 验证完成后，才报告发布完成。
 
 ## 方案
 
@@ -63,16 +63,16 @@
 | P1 | easy | correctness | `gh.go` | cancel/unknown 不再显示 pass，skipping 显式处理 | 无 |
 | P1 | easy | Windows | `security.go` | 修复跨卷 PATH 误过滤，并在 Windows CI 覆盖 | 无 |
 | P1 | medium | release | `.github/workflows/*` | PR/push CI；release 前强制 test/race/vet/version/build gate；Go 1.27.1 | 上述代码修复 |
-| P1 | medium | supply chain | `release-checksums.txt`, release 流程 | Release 后下载核验并提交 6 个二进制 digest | 上游 merge/tag/Release |
+| P1 | medium | supply chain | `release-checksums.txt`, release 流程 | Release 后下载核验并提交 6 个二进制 digest | 本仓库 merge/tag/Release |
 | P1 | medium | testing/docs | `TESTING.md`, `README.md` | 完整自动化、手工、安装、安全与发布后测试说明 | 测试入口稳定 |
-| P1 | external | delivery | GitHub fork/upstream | 推送 fork 并创建上游 PR；合并后打 `v0.2.3` | 全部 gate 通过、上游权限 |
+| P1 | medium | delivery | `zhy0216/herdr-gh-checks` | 推送本仓库分支并创建 PR；合并后打 `v0.2.3` | 全部 gate 通过 |
 | P2 | easy | quality | `gh.go` | 删除或使用 staticcheck 报告的未使用 `githubRemoteAllowed` | 可并行 |
 | P2 | easy | shell quality | `scripts/fetch-or-build.sh` | 清理 ShellCheck 的空 `CDPATH`、trap/条件链提示 | 无 |
 | P2 | medium | tests | side-effect command layer | 为 approve/review/send/update/watch/installer stub 增加集成测试，提高 41.3% 覆盖率 | 消息模型稳定 |
 | P2 | medium | reliability | subprocess layer | 为 gh/git/herdr 请求增加合理超时/取消，并正确 reap `c.Start()` 的进程 | roadmap |
 | P2 | medium | security | notes creation/open | 区分 EEXIST 与不安全已有目标，进一步缩小 symlink TOCTOU | notes 隔离 |
 | P2 | medium | repository handling | cwd/path validation | 从仓库子目录启动时统一定位 Git top-level | roadmap |
-| P2 | easy | maintenance | dependencies/repo settings | 定期依赖更新、Dependabot/分支保护；fork 可选开启 issues/topics | roadmap/仓库权限 |
+| P2 | easy | maintenance | dependencies/repo settings | 定期依赖更新、Dependabot/分支保护；本仓库可选开启 issues/topics | roadmap/仓库权限 |
 
 ## 校验
 
@@ -105,7 +105,7 @@ shellcheck scripts/fetch-or-build.sh
 
 ## 风险与假设
 
-- 当前账号不能写 `itisbryan/herdr-gh-checks`；上游 PR 可以创建，但 merge/tag/Release 是外部依赖。未获得权限前不能宣称上游发布完成。
+- 当前账号对 `zhy0216/herdr-gh-checks` 有管理和写入权限；PR、merge、tag 和 Release 均以该仓库为目标。GitHub 的 fork 关系不决定本项目的交付目标。
 - `release-checksums.txt` 当前为空是有意 fail-closed，但这意味着 v0.2.3 allowlist 合并前用户仍需本地 Go；必须完成二阶段 checksum 才算完整发布。
 - 原生 Windows 真机当前不可用；Windows runner、交叉编译和专门单元测试能覆盖确定性逻辑，但不能替代真实终端/ACL/reparse-point 验收。
 - GitHub 写操作必须在专用测试 PR/测试 workflow 中执行，避免影响真实分支或审批记录。

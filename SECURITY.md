@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Please report suspected vulnerabilities privately through the repository's [security advisory form](https://github.com/itisbryan/herdr-gh-checks/security/advisories/new) rather than opening a public issue. Include the affected version, platform, reproduction steps, and whether the issue involves a GitHub PR, a local worktree, or an installer artifact.
+Please report suspected vulnerabilities privately through the repository's [security advisory form](https://github.com/zhy0216/herdr-gh-checks/security/advisories/new) rather than opening a public issue. Include the affected version, platform, reproduction steps, and whether the issue involves a GitHub PR, a local worktree, or an installer artifact.
 
 Until a fix is available, avoid running the plugin on untrusted repositories or PRs, and prefer building from a reviewed source checkout.
 

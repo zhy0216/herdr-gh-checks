@@ -66,7 +66,9 @@ func TestLogic(t *testing.T) {
 }
 
 func TestWorkflowRequiresConfirmation(t *testing.T) {
-	m := newModel("")
+	// Use a directory without Git metadata so the branch picker cannot inherit
+	// remote branches from whichever checkout happens to run the test.
+	m := newModel(t.TempDir())
 	m.loaded = true
 	m.width = 80
 	m.status = Status{Repo: true, Branch: "main", PR: &PR{Number: 1, State: "OPEN"}}

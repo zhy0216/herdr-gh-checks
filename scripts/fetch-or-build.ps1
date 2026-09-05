@@ -20,7 +20,7 @@ $env:CLICOLOR = "0"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $root
 $bin = "herdr-gh-checks"
-$repo = "itisbryan/herdr-gh-checks"
+$repo = "zhy0216/herdr-gh-checks"
 
 # PowerShell can search the current directory before PATH. Keep only absolute
 # PATH entries outside this checkout and resolve build tools explicitly, so a

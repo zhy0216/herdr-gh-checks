@@ -61,6 +61,8 @@ type model struct {
 	picking             bool // agent-picker modal open
 	agents              []Agent
 	pick                int
+	creatingPR          bool // preparing or sending a Create PR request
+	createRequest       *createPRRequest
 	focus               int // 0 = PR/files list, 1 = Workflows list
 	workflows           []Workflow
 	runs                map[int]Run // latest run status per workflow
@@ -248,6 +250,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.prog.Width = w
 	case tea.MouseMsg:
 		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft &&
+			!msg.Alt && !msg.Ctrl && !msg.Shift && msg.Y == 2 && msg.X >= 2 &&
+			(m.height == 0 || m.height > 2) && msg.X < 2+ansi.StringWidth(m.createPRLabel()) {
+			cmd := m.startCreatePR()
+			return m, cmd
+		}
+		if msg.Action == tea.MouseActionPress && msg.Button == tea.MouseButtonLeft &&
 			!msg.Alt && !msg.Ctrl && !msg.Shift && msg.Y == 0 && msg.X >= 2 &&
 			msg.X < 2+ansi.StringWidth(m.webShortcutLabel()) {
 			return m, m.openCurrentWeb()
@@ -255,6 +263,25 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case webOpenFailedMsg:
 		m.sent = sanitizeTerminalText(string(msg))
 		m.sentFailed = true
+	case createPRReadyMsg:
+		if !m.creatingPR {
+			return m, nil
+		}
+		if !m.createPRAvailable() || m.status.Branch != msg.request.branch {
+			m.creatingPR = false
+			m.sent, m.sentFailed = "create PR cancelled: displayed branch changed; try again", true
+			return m, nil
+		}
+		if len(msg.agents) == 1 {
+			return m, sendCreatePR(msg.request, msg.agents[0].PaneID)
+		}
+		m.createRequest = &msg.request
+		m.agents, m.pick, m.picking = msg.agents, 0, true
+		return m, nil
+	case createPRResultMsg:
+		m.creatingPR, m.createRequest = false, nil
+		m.sent, m.sentFailed = sanitizeTerminalText(msg.text), msg.failed
+		return m, nil
 	case sentMsg:
 		wasUpdating := m.updating
 		m.sent = sanitizeTerminalText(msg.text)
@@ -441,6 +468,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			switch msg.String() {
 			case "esc", "q":
 				m.picking = false
+				m.creatingPR, m.createRequest = false, nil
 			case "up", "k":
 				if m.pick > 0 {
 					m.pick--
@@ -452,6 +480,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				if m.pick < len(m.agents) {
 					m.picking = false
+					if m.createRequest != nil {
+						request := *m.createRequest
+						m.createRequest = nil
+						if m.status.PR != nil || m.viewNum != 0 || m.status.Branch != request.branch {
+							m.creatingPR = false
+							m.sent, m.sentFailed = "create PR cancelled: displayed branch changed; try again", true
+							return m, nil
+						}
+						return m, sendCreatePR(request, m.agents[m.pick].PaneID)
+					}
 					return m, m.sendReview(m.agents[m.pick].PaneID)
 				}
 			}
@@ -510,6 +548,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "o": // open the displayed PR, or its branch when there is no PR
 			return m, m.openCurrentWeb()
+		case "c":
+			cmd := m.startCreatePR()
+			return m, cmd
 		case "d": // review ALL PR files in nvim, side-by-side; :qa advances
 			if m.status.PR != nil {
 				return m, m.diffAll(0)
@@ -602,6 +643,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					m.wfBranch = true
 				}
+			} else if m.createPRAvailable() {
+				cmd := m.startCreatePR()
+				return m, cmd
 			} else if m.cursor < len(ff) { // review the selected file's diff (ga to annotate)
 				return m, m.annotateFile(ff[m.cursor].Path, 0)
 			}
@@ -671,21 +715,26 @@ func (m model) pickerView() string {
 		w = 76
 	}
 	L := []string{"", "  " + sect.Render("REVIEW TO SEND"), ""}
-	notes := readNotes(notesFileFor(m.cwd, m.status))
-	if strings.TrimSpace(notes) == "" {
-		L = append(L, "  "+dim.Render("(no annotations — esc, then ⏎/ga to add)"))
+	if m.createRequest != nil {
+		L = []string{"", "  " + sect.Render("CREATE PR"), ""}
+		L = append(L, "  "+dim.Render("Branch: "+sanitizeTerminalText(m.createRequest.branch)), "  "+dim.Render("Base: "+sanitizeTerminalText(m.createRequest.base)))
 	} else {
-		lines := strings.Split(notes, "\n")
-		for i, ln := range lines {
-			if i >= 12 {
-				L = append(L, "  "+dim.Render(fmt.Sprintf("… +%d more", len(lines)-12)))
-				break
-			}
-			ln = trunc(ln, w)
-			if idx := strings.Index(ln, "  "); idx > 0 { // color the path:line prefix
-				L = append(L, "  "+cyan.Render(ln[:idx])+ln[idx:])
-			} else {
-				L = append(L, "  "+ln)
+		notes := readNotes(notesFileFor(m.cwd, m.status))
+		if strings.TrimSpace(notes) == "" {
+			L = append(L, "  "+dim.Render("(no annotations — esc, then ⏎/ga to add)"))
+		} else {
+			lines := strings.Split(notes, "\n")
+			for i, ln := range lines {
+				if i >= 12 {
+					L = append(L, "  "+dim.Render(fmt.Sprintf("… +%d more", len(lines)-12)))
+					break
+				}
+				ln = trunc(ln, w)
+				if idx := strings.Index(ln, "  "); idx > 0 { // color the path:line prefix
+					L = append(L, "  "+cyan.Render(ln[:idx])+ln[idx:])
+				} else {
+					L = append(L, "  "+ln)
+				}
 			}
 		}
 	}
@@ -937,17 +986,25 @@ func (m model) View() string {
 	if label == "" {
 		return body
 	}
-	header := "  " + cyan.Bold(true).Underline(true).Render(label) + dim.Render("  click · o open")
-	if m.height == 1 {
-		return header
+	header := []string{"  " + cyan.Bold(true).Underline(true).Render(label) + dim.Render("  click · o open")}
+	if button := m.createPRLabel(); button != "" {
+		header = append(header, "", "  "+cyan.Bold(true).Render(button)+dim.Render("  c create · p review other PRs"))
+	}
+	if m.width > 0 {
+		for i, line := range header {
+			header[i] = ansi.Truncate(line, m.width, "")
+		}
+	}
+	if m.height > 0 && len(header) >= m.height {
+		return strings.Join(header[:m.height], "\n")
 	}
 	lines := strings.Split(body, "\n")
-	// Reserve the first row for the shortcut; Bubble Tea otherwise clips from
+	// Reserve the top rows for actions; Bubble Tea otherwise clips from
 	// the top when the content is taller than the pane.
-	if m.height > 1 && len(lines) >= m.height {
-		lines = lines[len(lines)-(m.height-1):]
+	if m.height > 0 && len(lines) > m.height-len(header) {
+		lines = lines[len(lines)-(m.height-len(header)):]
 	}
-	return header + "\n" + strings.Join(lines, "\n")
+	return strings.Join(append(header, lines...), "\n")
 }
 
 func (m model) contentView() string {
@@ -975,8 +1032,7 @@ func (m model) contentView() string {
 		return "\n  " + dim.Render("not a git repository")
 	}
 	if s.PR == nil {
-		L := []string{"", "  " + dim.Render("no open PR for this branch") + "  " + dim.Render("· p review other PRs")}
-		L = append(L, "", "  "+ciHeadline(s.Checks, frame), "", "  "+fhdr("CHECKS", m.folds[1], "2"))
+		L := []string{"", "  " + ciHeadline(s.Checks, frame), "", "  " + fhdr("CHECKS", m.folds[1], "2")}
 		if !m.folds[1] {
 			for _, ln := range m.checkRows(s.Checks, frame) {
 				L = append(L, "  "+ln)

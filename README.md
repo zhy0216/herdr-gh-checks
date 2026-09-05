@@ -79,6 +79,25 @@ Click the shortcut at the very top of the pane to open the displayed PR (for
 example, `#1112 ↗`) in your browser. When there is no PR, it shows the branch
 name and opens that branch on GitHub. Press `o` for the same action.
 
+Without a PR, click **Create PR** (or press `c` / `⏎` with the PR area focused)
+to ask an agent in the same Herdr workspace to create one. A single agent receives
+the request directly; with multiple agents, choose a recipient. If no agent is
+open in that workspace, the pane shows an error. The request includes the working
+directory, repository, current branch, and PR base branch.
+
+Optionally add a JSON `.herdr-gh-check` file at the repository or worktree root:
+
+```json
+{
+  "default_branch": "develop"
+}
+```
+
+`default_branch` takes precedence over GitHub's default branch. When omitted, the
+plugin queries `gh repo view <owner/repo> --json defaultBranchRef --jq .defaultBranchRef.name`.
+Invalid configuration or a failed lookup shows an error before sending the request.
+The config is read when Create PR is activated, so edits apply without restarting.
+
 | Key | Action |
 | --- | --- |
 | `↑↓` · `j` `k` | Move the file cursor |
@@ -86,6 +105,7 @@ name and opens that branch on GitHub. Press `o` for the same action.
 | `d` | Review all files side-by-side |
 | `/` | Filter files |
 | `a` · `s` | Manage annotations · send review to an agent |
+| `c` | Create PR through an agent in the current workspace (when there is no PR) |
 | `u` · `m` · `o` | Confirm/update branch with base · merge · open PR or branch on web |
 | `p` | Browse & review other PRs (`a` confirm approve · `r` review · `c` comment) |
 | `tab` `w` | Focus Workflows — `⏎` choose/confirm run · `v` watch a run |

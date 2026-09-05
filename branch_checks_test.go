@@ -132,7 +132,7 @@ func TestBranchCIViewAndRefresh(t *testing.T) {
 				t.Fatal("branch update did not schedule refresh")
 			}
 			view := m.View()
-			for _, want := range []string{"main", "no open PR", tt.headline, "CHECKS", "Branch build"} {
+			for _, want := range []string{"main", "Create PR", tt.headline, "CHECKS", "Branch build"} {
 				if !strings.Contains(view, want) {
 					t.Fatalf("view missing %q: %s", want, view)
 				}

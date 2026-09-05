@@ -76,7 +76,7 @@ tester for every manual run.
 2. Open the `panel` entrypoint from a Herdr workspace whose cwd is a GitHub
    repository.
 3. Confirm that a repository with no current PR shows the branch and its
-   checked-out commit's GitHub Actions results, alongside the no-open-PR state.
+   checked-out commit's GitHub Actions results, alongside the Create PR button.
    Check running, passing, failing, and empty results on `main`, and confirm
    that polling continues after completion and the CHECKS section folds.
    A new unpushed commit must not inherit a previous commit's passing result.
@@ -89,6 +89,15 @@ tester for every manual run.
    including when viewing another PR; without a PR, the branch name opens that
    branch on GitHub. Confirm that `o` does the same, the shortcut stays at the
    top in a short pane, and clicks in modal dialogs do not open a browser.
+7. Without a PR, click Create PR or press `c`. With one agent in the workspace,
+   confirm it receives the request; with multiple agents, choose one or cancel.
+   Agents in other workspaces must not be offered. With no agent, confirm a visible
+   error. Close or move the selected agent before sending and confirm an error.
+8. Set `default_branch` in the root `.herdr-gh-check` JSON file and confirm the
+   agent prompt uses it. Remove the setting and confirm GitHub's default branch
+   is used. Repeat from a subdirectory and a linked worktree, and verify malformed
+   config and failed default-branch lookup errors. Use a disposable repository
+   when letting the receiving agent carry out PR creation.
 
 ### Review and annotation
 

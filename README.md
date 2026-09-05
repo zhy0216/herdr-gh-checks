@@ -11,7 +11,7 @@
 
 ## Features
 
-- **Live CI watch** — PR pill, review decision, animated per-check progress, and the changed-file list, polled every 5s until the PR settles.
+- **Live CI watch** — PR pill, review decision, animated per-check progress, and the changed-file list, polled every 5s until the PR settles. Branches without a PR (including `main`) show GitHub Actions results for the checked-out commit in the pane and sidebar, taking the latest run per workflow from up to 100 runs and continuing to poll every 5s. A commit with no runs shows no checks instead of reusing an older commit's result.
 - **Line-anchored annotations** — open a file side-by-side against base in `nvim`, press `ga` on any line to record a `path:line` note, manage notes with `a`, then press `s` to send the review to an agent pane.
 - **Any PR** — press `p` to browse open PRs and review / approve / comment / request-changes without leaving the pane.
 - **Workflows** — trigger a GitHub Actions workflow on a branch and watch a run to completion, right in the pane.

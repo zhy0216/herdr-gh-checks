@@ -1,11 +1,12 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -644,9 +645,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.wfLoaded = true
 			cmds = append(cmds, workflowsCmd(m.cwd))
 		}
-		if m.status.PR != nil && len(m.status.PR.Checks) > 0 {
-			sm := ciSummary(m.status.PR.Checks)
-			cmds = append(cmds, m.prog.SetPercent(float64(sm.Pass)/float64(len(m.status.PR.Checks)))) // animated fill
+		if checks := m.status.checks(); len(checks) > 0 {
+			sm := ciSummary(checks)
+			cmds = append(cmds, m.prog.SetPercent(float64(sm.Pass)/float64(len(checks)))) // animated fill
+		} else {
+			cmds = append(cmds, m.prog.SetPercent(0))
 		}
 		if !settled(m.status) {
 			cmds = append(cmds, refetchCmd(m.cwd, m.viewNum, m.fetchGeneration))
@@ -846,6 +849,60 @@ func (m model) workflowContent(frame string) []string {
 	return c
 }
 
+func ciHeadline(checks []Check, frame string) string {
+	sm := ciSummary(checks)
+	n := len(checks)
+	var hl string
+	switch sm.Overall {
+	case "fail":
+		hl = red.Bold(true).Render("✗ CI failing") + " " + dim.Render(fmt.Sprintf("· %d/%d failed", sm.Fail, n))
+	case "pending":
+		hl = yellow.Bold(true).Render(frame+" CI running") + " " + dim.Render(fmt.Sprintf("· %d/%d left", sm.Pending, n))
+	case "pass":
+		hl = green.Bold(true).Render("✓ CI passing") + " " + dim.Render(fmt.Sprintf("· %d checks", n))
+	default:
+		hl = dim.Render("no checks reported")
+	}
+	return hl
+}
+
+func (m model) checkRows(checks []Check, frame string) []string {
+	if len(checks) == 0 {
+		return []string{"  " + dim.Render("no checks reported yet")}
+	}
+	var rows []string
+	add := func(row string) { rows = append(rows, row) }
+	cs := slices.Clone(checks)
+	rank := map[string]int{"fail": 0, "pending": 1, "pass": 2}
+	rankOf := func(b string) int {
+		if r, ok := rank[b]; ok {
+			return r
+		}
+		return 3
+	}
+	slices.SortStableFunc(cs, func(a, b Check) int { return cmp.Compare(rankOf(a.Bucket), rankOf(b.Bucket)) })
+	sm := ciSummary(checks)
+	pr := m.prog // aggregate CI bar, colored by state, inline on the top check
+	switch sm.Overall {
+	case "fail":
+		pr.FullColor = "#f38ba8"
+	case "pending":
+		pr.FullColor = "#f9e2af"
+	default:
+		pr.FullColor = "#a6e3a1"
+	}
+	for i, c := range cs {
+		ic, st := checkGlyph(c.Bucket, frame)
+		row := "  " + st.Render(ic) + " " + sanitizeTerminalText(c.Name)
+		if i == 0 {
+			row += "   " + pr.View()
+		}
+		add(row)
+	}
+	add("  " + green.Render(fmt.Sprintf("%d pass", sm.Pass)) + " " + dim.Render("·") + " " + red.Render(fmt.Sprintf("%d fail", sm.Fail)) + " " + dim.Render("·") + " " + yellow.Render(fmt.Sprintf("%d pending", sm.Pending)))
+	return rows
+}
+
 func (m model) View() string {
 	if m.confirmAction != "" {
 		return m.confirmView()
@@ -864,7 +921,7 @@ func (m model) View() string {
 	}
 	frame := m.sp.View()
 	if !m.loaded {
-		return "\n  " + cyan.Render(frame) + " " + dim.Render("loading PR…")
+		return "\n  " + cyan.Render(frame) + " " + dim.Render("loading CI / PR…")
 	}
 	s := m.status
 	if !s.Repo {
@@ -872,6 +929,12 @@ func (m model) View() string {
 	}
 	if s.PR == nil {
 		L := []string{"", "  " + bold.Render(sanitizeTerminalText(s.Branch)), "", "  " + dim.Render("no open PR for this branch") + "  " + dim.Render("· p review other PRs")}
+		L = append(L, "", "  "+ciHeadline(s.Checks, frame), "", "  "+fhdr("CHECKS", m.folds[1], "2"))
+		if !m.folds[1] {
+			for _, ln := range m.checkRows(s.Checks, frame) {
+				L = append(L, "  "+ln)
+			}
+		}
 		if wc := m.workflowContent(frame); len(wc) > 0 {
 			L = append(L, "")
 			for _, ln := range wc {
@@ -925,19 +988,7 @@ func (m model) View() string {
 	}
 
 	if p.State == "OPEN" {
-		sm := ciSummary(p.Checks)
-		n := len(p.Checks)
-		var hl string
-		switch sm.Overall {
-		case "fail":
-			hl = red.Bold(true).Render("✗ CI failing") + " " + dim.Render(fmt.Sprintf("· %d/%d failed", sm.Fail, n))
-		case "pending":
-			hl = yellow.Bold(true).Render(frame+" CI running") + " " + dim.Render(fmt.Sprintf("· %d/%d left", sm.Pending, n))
-		case "pass":
-			hl = green.Bold(true).Render("✓ CI passing") + " " + dim.Render(fmt.Sprintf("· %d checks", n))
-		default:
-			hl = dim.Render("no checks reported")
-		}
+		hl := ciHeadline(p.Checks, frame)
 		blank()
 		add(hl)
 	}
@@ -989,37 +1040,10 @@ func (m model) View() string {
 			add(mauve.Render(" merged"))
 		case p.State == "CLOSED":
 			add(red.Render("✗ closed"))
-		case len(p.Checks) == 0:
-			add("  " + dim.Render("no checks reported yet"))
 		default:
-			cs := append([]Check{}, p.Checks...)
-			rank := map[string]int{"fail": 0, "pending": 1, "pass": 2}
-			rankOf := func(b string) int {
-				if r, ok := rank[b]; ok {
-					return r
-				}
-				return 3
+			for _, ln := range m.checkRows(p.Checks, frame) {
+				add(ln)
 			}
-			sort.SliceStable(cs, func(i, j int) bool { return rankOf(cs[i].Bucket) < rankOf(cs[j].Bucket) })
-			sm := ciSummary(p.Checks)
-			pr := m.prog // aggregate CI bar, colored by state, inline on the top check
-			switch sm.Overall {
-			case "fail":
-				pr.FullColor = "#f38ba8"
-			case "pending":
-				pr.FullColor = "#f9e2af"
-			default:
-				pr.FullColor = "#a6e3a1"
-			}
-			for i, c := range cs {
-				ic, st := checkGlyph(c.Bucket, frame)
-				row := "  " + st.Render(ic) + " " + sanitizeTerminalText(c.Name)
-				if i == 0 {
-					row += "   " + pr.View()
-				}
-				add(row)
-			}
-			add("  " + green.Render(fmt.Sprintf("%d pass", sm.Pass)) + " " + dim.Render("·") + " " + red.Render(fmt.Sprintf("%d fail", sm.Fail)) + " " + dim.Render("·") + " " + yellow.Render(fmt.Sprintf("%d pending", sm.Pending)))
 		}
 	}
 

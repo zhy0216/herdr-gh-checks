@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,6 +50,14 @@ type Status struct {
 	Repo   bool
 	Branch string
 	PR     *PR
+	Checks []Check // Current commit's workflow checks when there is no PR.
+}
+
+func (s Status) checks() []Check {
+	if s.PR != nil {
+		return s.PR.Checks
+	}
+	return s.Checks
 }
 
 // run executes name in cwd, returning trimmed stdout and ok=false on any error.
@@ -210,7 +219,11 @@ func prStatusNum(cwd string, num int) Status {
 		"number,state,title,body,url,assignees,labels,files,additions,deletions,changedFiles,reviewDecision,headRefName")
 	viewRaw, ok := runGH(cwd, viewArgs...)
 	if !ok {
-		return Status{Repo: true, Branch: branch}
+		st := Status{Repo: true, Branch: branch}
+		if num == 0 {
+			st.Checks = branchChecks(cwd, branch)
+		}
+		return st
 	}
 	var pr PR
 	if json.Unmarshal([]byte(viewRaw), &pr) != nil {
@@ -267,18 +280,20 @@ func ciSummary(checks []Check) Summary {
 	return s
 }
 
-// sidebar state: pass | fail | run | merged | open | "" (no PR)
+// sidebar state: pass | fail | run | merged | open | "" (no PR or checks)
 func stateOf(st Status) string {
-	if !st.Repo || st.PR == nil {
+	if !st.Repo {
 		return ""
 	}
-	switch st.PR.State {
-	case "MERGED":
-		return "merged"
-	case "CLOSED":
-		return "fail"
+	if st.PR != nil {
+		switch st.PR.State {
+		case "MERGED":
+			return "merged"
+		case "CLOSED":
+			return "fail"
+		}
 	}
-	switch ciSummary(st.PR.Checks).Overall {
+	switch ciSummary(st.checks()).Overall {
 	case "fail":
 		return "fail"
 	case "pending":
@@ -286,6 +301,9 @@ func stateOf(st Status) string {
 	case "pass":
 		return "pass"
 	default:
+		if st.PR == nil {
+			return ""
+		}
 		return "open"
 	}
 }
@@ -452,8 +470,58 @@ func runWorkflow(cwd string, id int, ref string) error {
 // active = most recently committed; capped so long-lived repos don't dump every stale branch.
 type Run struct {
 	WorkflowID int    `json:"workflowDatabaseId"`
+	Name       string `json:"workflowName"`
 	Status     string `json:"status"`     // queued, in_progress, completed
 	Conclusion string `json:"conclusion"` // success, failure, ...
+}
+
+// Restrict runs to the checked-out commit so old CI cannot make a new,
+// unpushed commit look green. Detached HEADs are queried by SHA alone.
+func branchChecks(cwd, branch string) []Check {
+	head, ok := runGit(cwd, "rev-parse", "--verify", "HEAD")
+	if !ok {
+		return nil
+	}
+	args := []string{"run", "list", "--all", "--commit", head, "--limit", "100",
+		"--json", "workflowDatabaseId,workflowName,status,conclusion"}
+	if branch != "HEAD" {
+		args = append(args, "--branch", branch)
+	}
+	raw, ok := runGH(cwd, args...)
+	if !ok {
+		return nil
+	}
+	var runs []Run
+	if json.Unmarshal([]byte(raw), &runs) != nil {
+		return nil
+	}
+	var checks []Check
+	seen := make(map[int]bool)
+	for _, r := range runs {
+		// gh returns newest first. A new run supersedes earlier runs of
+		// the same workflow for this commit, including failed attempts.
+		if r.WorkflowID > 0 && seen[r.WorkflowID] {
+			continue
+		}
+		seen[r.WorkflowID] = true
+		name := cmp.Or(r.Name, fmt.Sprintf("Workflow %d", r.WorkflowID))
+		c := Check{Name: name, State: r.Status, Bucket: "pending"}
+		if r.Status == "completed" {
+			c.State = r.Conclusion
+			switch r.Conclusion {
+			case "success", "neutral":
+				c.Bucket = "pass"
+			case "skipped":
+				c.Bucket = "skipping"
+			case "cancelled":
+				c.Bucket = "cancel"
+			case "failure", "timed_out", "action_required", "startup_failure", "stale":
+				c.Bucket = "fail"
+			}
+		}
+		checks = append(checks, c)
+	}
+	return checks
 }
 
 // latest run per workflow (gh run list is newest-first)

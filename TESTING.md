@@ -75,8 +75,11 @@ tester for every manual run.
    `herdr plugin link .`.
 2. Open the `panel` entrypoint from a Herdr workspace whose cwd is a GitHub
    repository.
-3. Confirm that a repository with no current PR shows the branch and the
-   no-open-PR state without exiting or repeatedly stealing focus.
+3. Confirm that a repository with no current PR shows the branch and its
+   checked-out commit's GitHub Actions results, alongside the no-open-PR state.
+   Check running, passing, failing, and empty results on `main`, and confirm
+   that polling continues after completion and the CHECKS section folds.
+   A new unpushed commit must not inherit a previous commit's passing result.
 4. Confirm that an open PR displays its title, body, review decision, labels,
    assignees, changed files, and CI buckets. Check pending, passing, failing,
    closed, and merged states.
@@ -115,6 +118,7 @@ Use a disposable repository and PR for this section.
 
 1. Configure all documented `ci_*` tokens and start the plugin normally.
 2. Verify open, running, pass, fail, and merged glyphs on separate workspaces.
+   Include running, passing, and failing CI on a branch without a PR.
 3. Confirm that the running glyph animates, old state tokens are cleared, and
    token TTL expiry removes stale state after the daemon stops.
 
